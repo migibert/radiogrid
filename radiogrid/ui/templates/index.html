@@ -54,24 +54,38 @@
         <div id="scoreboard"></div>
       </div>
 
-      <div id="canvas-wrap">
-        <canvas id="grid-canvas"></canvas>
+      <div id="canvas-container">
+        <div id="canvas-wrap">
+          <canvas id="grid-canvas"></canvas>
+        </div>
+        <!-- Minimap -->
+        <canvas id="minimap-canvas"></canvas>
+        <!-- Zoom controls overlay -->
+        <div id="zoom-controls">
+          <button id="btn-zoom-in"  class="btn btn-zoom" title="Zoom in">+</button>
+          <button id="btn-zoom-out" class="btn btn-zoom" title="Zoom out">−</button>
+          <button id="btn-zoom-fit" class="btn btn-zoom" title="Fit to view">⊞</button>
+          <span id="zoom-level">100%</span>
+        </div>
       </div>
 
-      <div id="playback-controls">
-        <button id="btn-start" class="btn" title="Start">⏮</button>
-        <button id="btn-prev"  class="btn" title="Previous">◀</button>
-        <button id="btn-play"  class="btn" title="Play/Pause">⏯</button>
-        <button id="btn-next"  class="btn" title="Next">▶</button>
-        <button id="btn-end"   class="btn" title="End">⏭</button>
-        <label>Speed
-          <input id="speed-slider" type="range" min="1" max="60" value="10"/>
-          <span id="speed-val">10 t/s</span>
-        </label>
-        <span id="turn-info">Turn 0 / 0</span>
-      </div>
+      <div id="playback-bar">
+        <div id="playback-controls">
+          <button id="btn-start" class="btn" title="Start">⏮</button>
+          <button id="btn-prev"  class="btn" title="Previous">◀</button>
+          <button id="btn-play"  class="btn" title="Play/Pause">⏯</button>
+          <button id="btn-next"  class="btn" title="Next">▶</button>
+          <button id="btn-end"   class="btn" title="End">⏭</button>
+          <input id="turn-slider" type="range" min="0" max="0" value="0" title="Scrub through turns"/>
+          <span id="turn-info">Turn 0 / 0</span>
+          <label class="speed-label">Speed
+            <input id="speed-slider" type="range" min="1" max="60" value="10"/>
+            <span id="speed-val">10 t/s</span>
+          </label>
+        </div>
 
-      <button id="btn-back" class="btn btn-secondary">← New Game</button>
+        <button id="btn-back" class="btn btn-secondary">← New Game</button>
+      </div>
     </section>
   </main>
 
