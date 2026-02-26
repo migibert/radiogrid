@@ -383,6 +383,14 @@ function showVis() {
 function renderScoreboard() {
   const sb = $("#scoreboard");
   sb.innerHTML = "";
+
+  // Show exploration target
+  const total = history.result.total_explorable;
+  const hdr = document.createElement("div");
+  hdr.className = "score-header";
+  hdr.textContent = `Goal: explore all ${total} tiles`;
+  sb.appendChild(hdr);
+
   history.teams.forEach((t, i) => {
     const item = document.createElement("div");
     item.className = "score-item";
@@ -397,7 +405,7 @@ function renderScoreboard() {
 
     const val = document.createElement("span");
     val.className = "score-value";
-    val.textContent = "0";
+    val.textContent = "0 / " + total + " (0%)";
 
     item.append(sw, lbl, val);
     sb.appendChild(item);
@@ -405,9 +413,13 @@ function renderScoreboard() {
 }
 
 function updateScores(scores) {
+  const total = history.result.total_explorable;
   history.teams.forEach((t) => {
     const el = $(`#score-team-${t.id} .score-value`);
-    if (el) el.textContent = scores[String(t.id)] ?? 0;
+    if (!el) return;
+    const s = scores[String(t.id)] ?? 0;
+    const pct = total > 0 ? Math.round((s / total) * 100) : 0;
+    el.textContent = `${s} / ${total} (${pct}%)`;
   });
 }
 
@@ -572,8 +584,13 @@ function drawTurn() {
 
   // 5) Update UI
   updateScores(scores);
-  const total = history.turns.length;
-  $("#turn-info").textContent = `Turn ${currentTurn} / ${total}`;
+  const totalTurns = history.turns.length;
+  let turnText = `Turn ${currentTurn} / ${totalTurns}`;
+  if (history.result.fully_explored_by && currentTurn >= totalTurns) {
+    const winTeam = history.teams.find(t => t.id === history.result.fully_explored_by);
+    turnText += ` — ${winTeam ? winTeam.name : 'Team ' + history.result.fully_explored_by} fully explored the map!`;
+  }
+  $("#turn-info").textContent = turnText;
 
   // 6) Update minimap
   drawMinimap();

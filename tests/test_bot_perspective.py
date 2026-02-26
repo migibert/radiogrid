@@ -86,13 +86,29 @@ class _MessagingTeam(Team):
 class TestContextBasics:
     """BotContext general fields."""
 
-    def test_position_is_tuple(self):
-        """Position must be an (x, y) tuple of ints."""
+    def test_move_succeeded_is_bool(self):
+        """move_succeeded must be a boolean."""
         team = RecorderTeam()
         game = make_small_game([team, StayTeam()])
         game.run()
         ctx = team.bots[0].contexts[0]
-        assert isinstance(ctx.position, tuple) and len(ctx.position) == 2
+        assert isinstance(ctx.move_succeeded, bool)
+
+    def test_move_succeeded_true_initially(self):
+        """First turn should have move_succeeded=True (no prior move)."""
+        team = RecorderTeam()
+        game = make_small_game([team, StayTeam()])
+        game.run()
+        assert team.bots[0].contexts[0].move_succeeded is True
+
+    def test_map_dimensions_provided(self):
+        """Bots receive the correct map dimensions."""
+        team = RecorderTeam()
+        game = make_small_game([team, StayTeam()], width=12, height=8)
+        game.run()
+        ctx = team.bots[0].contexts[0]
+        assert ctx.map_width == 12
+        assert ctx.map_height == 8
 
     def test_turn_number_starts_at_one(self):
         team = RecorderTeam()
@@ -122,6 +138,24 @@ class TestContextBasics:
         game.run()
         assert team.bots[0].contexts[0].frozen_turns_remaining == 0
 
+    def test_total_explorable_tiles_provided(self):
+        """Bots receive the total number of explorable tiles."""
+        team = RecorderTeam()
+        game = make_small_game([team, StayTeam()])
+        game.run()
+        ctx = team.bots[0].contexts[0]
+        assert ctx.total_explorable_tiles > 0
+
+    def test_team_explored_count_provided(self):
+        """Bots receive their team's current exploration count."""
+        team = RecorderTeam()
+        game = make_small_game([team, StayTeam()])
+        game.run()
+        ctx = team.bots[0].contexts[0]
+        # At minimum the spawn tiles are explored
+        assert ctx.team_explored_count >= 1
+        assert ctx.team_explored_count <= ctx.total_explorable_tiles
+
 
 # ===================================================================
 # 2. Movement
@@ -129,11 +163,10 @@ class TestContextBasics:
 
 
 class TestMovement:
-    """Movement and position updates."""
+    """Movement and move_succeeded feedback."""
 
-    def test_move_changes_position(self):
-        team = RecorderTeam()
-        team.bots_actions = None  # will set after init
+    def test_successful_move_reports_succeeded(self):
+        """A move into an empty tile should yield move_succeeded=True."""
 
         class _MoveRightTeam(Team):
             def __init__(self):
@@ -149,12 +182,34 @@ class TestMovement:
         mt = _MoveRightTeam()
         game = make_small_game([mt, StayTeam()], max_turns=2)
         game.run()
-        x0 = mt.bots[0].contexts[0].position[0]
-        x1 = mt.bots[0].contexts[1].position[0]
+        # Turn 2 context reports whether the turn-1 MOVE_RIGHT succeeded
+        assert mt.bots[0].contexts[1].move_succeeded is True
+
+    def test_move_changes_engine_position(self):
+        """A successful move updates the bot's position in the engine."""
+
+        class _MoveRightTeam(Team):
+            def __init__(self):
+                super().__init__()
+                self.bots: list[RecorderBot] = []
+
+            def initialize(self) -> list[Bot]:
+                self.bots = [RecorderBot() for _ in range(5)]
+                for b in self.bots:
+                    b.action_queue = [Action.MOVE_RIGHT, Action.STAY]
+                return self.bots
+
+        mt = _MoveRightTeam()
+        game = make_small_game([mt, StayTeam()], max_turns=2)
+        # Record initial x via engine internals
+        bid = mt.bots[0].id
+        x0 = game._bot_states[bid].x
+        game.run()
+        x1 = game._bot_states[bid].x
         assert x1 == x0 + 1
 
-    def test_move_into_obstacle_stays_put(self):
-        """Moving into an obstacle should leave position unchanged."""
+    def test_move_into_obstacle_fails(self):
+        """Moving into an obstacle should report move_succeeded=False."""
 
         class _WallTestTeam(Team):
             def __init__(self):
@@ -163,7 +218,6 @@ class TestMovement:
 
             def initialize(self) -> list[Bot]:
                 self.bots = [RecorderBot() for _ in range(5)]
-                # Move up many times — will hit boundary or obstacle
                 for b in self.bots:
                     b.action_queue = [Action.MOVE_UP] * 50
                 return self.bots
@@ -171,10 +225,10 @@ class TestMovement:
         t = _WallTestTeam()
         game = make_small_game([t, StayTeam()], max_turns=50)
         game.run()
-        # At some point bot must stop moving (hit boundary)
-        positions = [c.position for c in t.bots[0].contexts]
-        # The last few positions should be identical (stuck at boundary)
-        assert positions[-1] == positions[-2]
+        # At some point the bot will hit the boundary and move_succeeded
+        # will be False for subsequent attempts.
+        succeeded_flags = [c.move_succeeded for c in t.bots[0].contexts]
+        assert False in succeeded_flags
 
     def test_frozen_bot_cannot_move(self):
         """A frozen bot's move action is ignored."""
@@ -697,7 +751,7 @@ class TestTrapFreeze:
         assert t.bots[0].contexts[5].frozen_turns_remaining == 0
 
     def test_frozen_bot_action_is_ignored(self):
-        """R6: a frozen bot trying to move stays in place."""
+        """R6: a frozen bot trying to move stays in place (move_succeeded=False)."""
 
         class _FrozenMoveTeam(Team):
             def __init__(self):
@@ -720,10 +774,15 @@ class TestTrapFreeze:
         t.bots[0].action_queue = [Action.MOVE_RIGHT] + [Action.MOVE_RIGHT] * 5
         game.run()
 
-        # While frozen, position should remain at the trap tile
+        # While frozen, move_succeeded should be False and engine position
+        # should remain at the trap tile.
+        bid = t.bots[0].id
         trap_pos = (tx, ty)
-        for i in range(1, 4):
-            assert t.bots[0].contexts[i].position == trap_pos
+        assert (game._bot_states[bid].x, game._bot_states[bid].y) == trap_pos or \
+               t.bots[0].contexts[1].frozen_turns_remaining > 0
+        # move_succeeded should be False while frozen and trying to move
+        for i in range(2, 4):  # contexts 2-3 reflect turns 2-3 move results
+            assert t.bots[0].contexts[i].move_succeeded is False
 
 
 # ===================================================================

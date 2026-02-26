@@ -25,6 +25,7 @@ class _BotState:
     listen_frequency: int = 0
     inbox: list[Message] = field(default_factory=list)
     scan_result: ScanResult | None = None
+    last_move_succeeded: bool = True
 
 
 # ---------------------------------------------------------------------------
@@ -43,6 +44,9 @@ class GameResult:
                  appear in the list in their original registration order.
         turns_played: Total number of turns that were executed.
         is_draw: True when the top two (or more) teams are tied.
+        total_explorable: Number of non-obstacle tiles on the map.
+        fully_explored_by: Team id of the first team to explore all tiles,
+                           or None if no team achieved full exploration.
     """
 
     scores: dict[int, int]
@@ -50,6 +54,8 @@ class GameResult:
     ranking: list[int]
     turns_played: int
     is_draw: bool
+    total_explorable: int = 0
+    fully_explored_by: int | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +143,19 @@ class Game:
         for bot_state in self._bot_states.values():
             self._visited[bot_state.team_id].add((bot_state.x, bot_state.y))
 
+        # Count total explorable tiles (exclude obstacles AND traps).
+        # Traps are passable but carry only a freeze penalty — no
+        # exploration reward, so they don't count toward the goal.
+        self._total_explorable = sum(
+            1
+            for x in range(self.game_map.width)
+            for y in range(self.game_map.height)
+            if self.game_map.tiles[x][y] not in (TileType.OBSTACLE, TileType.TRAP)
+        )
+
+        # Track which team (if any) first fully explores the map
+        self._fully_explored_by: int | None = None
+
         # History recording
         self._snapshots: list[dict] = []
         self._prev_visited: dict[int, set[tuple[int, int]]] = {
@@ -150,10 +169,19 @@ class Game:
     # ------------------------------------------------------------------
 
     def run(self) -> GameResult:
-        """Execute the full game and return the result."""
+        """Execute the full game and return the result.
+
+        The game ends when ``max_turns`` are exhausted **or** when a team
+        has visited every explorable (non-obstacle) tile on the map.
+        The team with the most explored tiles wins.
+        """
         for _ in range(self.max_turns):
             self.turn += 1
             self._execute_turn()
+
+            # Early termination: a team fully explored the map
+            if self._fully_explored_by is not None:
+                break
 
         self._result = self._build_result()
         return self._result
@@ -187,6 +215,14 @@ class Game:
                     state.y = ny
                     moved_bots.add(bid)
 
+        # Step 2b — Track move success for bot feedback
+        for bid, out in outputs.items():
+            state = self._bot_states[bid]
+            if out.action in DIRECTION_VECTORS:
+                state.last_move_succeeded = bid in moved_bots
+            else:
+                state.last_move_succeeded = True
+
         # Step 3 — Trap effects (R5): only for bots that actually moved
         just_trapped: set[int] = set()
         for bid in moved_bots:
@@ -196,10 +232,18 @@ class Game:
                 just_trapped.add(bid)
 
         # Step 4 — Update exploration scores (R20-R22)
+        # Traps are passable but do NOT count as explored (penalty only).
         for state in self._bot_states.values():
             tile = self.game_map.get_tile(state.x, state.y)
-            if tile != TileType.OBSTACLE:
+            if tile not in (TileType.OBSTACLE, TileType.TRAP):
                 self._visited[state.team_id].add((state.x, state.y))
+
+        # Check for full map exploration
+        if self._fully_explored_by is None:
+            for tid in self._team_ids:
+                if len(self._visited[tid]) >= self._total_explorable:
+                    self._fully_explored_by = tid
+                    break  # first team checked wins ties within a turn
 
         # Step 5 — Scan results (built now, delivered next turn via context)
         for bid, out in outputs.items():
@@ -237,19 +281,29 @@ class Game:
     # ------------------------------------------------------------------
 
     def _build_context(self, state: _BotState) -> BotContext:
-        """Build the read-only context snapshot for this bot."""
+        """Build the read-only context snapshot for this bot.
+
+        Absolute position is *not* exposed.  Instead the bot receives
+        ``move_succeeded`` (whether its last movement action worked)
+        and the map dimensions so it can self-localise via border
+        detection.
+        """
         # Read-and-clear scan result (one-shot delivery, R9)
         scan = state.scan_result
         state.scan_result = None
 
         return BotContext(
-            position=(state.x, state.y),
             frozen_turns_remaining=state.frozen_turns_remaining,
+            move_succeeded=state.last_move_succeeded,
+            map_width=self.game_map.width,
+            map_height=self.game_map.height,
             inbox=list(state.inbox),
             scan_result=scan,
             broadcast_frequency=state.broadcast_frequency,
             listen_frequency=state.listen_frequency,
             turn_number=self.turn,
+            total_explorable_tiles=self._total_explorable,
+            team_explored_count=len(self._visited[state.team_id]),
         )
 
     @staticmethod
@@ -411,6 +465,8 @@ class Game:
                 "ranking": result.ranking,
                 "is_draw": result.is_draw,
                 "turns_played": result.turns_played,
+                "total_explorable": result.total_explorable,
+                "fully_explored_by": result.fully_explored_by,
             },
         }
 
@@ -434,4 +490,6 @@ class Game:
             ranking=ranking,
             turns_played=self.turn,
             is_draw=is_draw,
+            total_explorable=self._total_explorable,
+            fully_explored_by=self._fully_explored_by,
         )

@@ -86,15 +86,31 @@ class BotContext:
     """Read-only context provided to a bot each turn.
 
     This is the only information a bot receives about the game state.
+    Bots do **not** receive their absolute position — they must infer
+    it by tracking their own movements (via ``move_succeeded``) and
+    scanning for map borders (``OUT_OF_BOUNDS`` tiles).
+
+    ``map_width`` and ``map_height`` are provided so that, once a bot
+    detects a border, it can compute its absolute coordinate on that
+    axis.
+
+    ``total_explorable_tiles`` is the number of non-obstacle tiles on
+    the map.  The goal is to be the first team to visit all of them.
+    ``team_explored_count`` tells the bot how many distinct tiles its
+    team has explored so far.
     """
 
-    position: tuple[int, int]
     frozen_turns_remaining: int
+    move_succeeded: bool = True
+    map_width: int = 0
+    map_height: int = 0
     inbox: list[Message] = field(default_factory=list)
     scan_result: Optional[ScanResult] = None
     broadcast_frequency: int = 0
     listen_frequency: int = 0
     turn_number: int = 0
+    total_explorable_tiles: int = 0
+    team_explored_count: int = 0
 
 
 @dataclass

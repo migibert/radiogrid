@@ -91,7 +91,10 @@ select { width: 170px; cursor: pointer; }
 #vis-header { display: flex; justify-content: space-between; align-items: flex-start;
               flex-wrap: wrap; gap: 8px; margin-bottom: 8px; flex-shrink: 0; }
 
-#scoreboard { display: flex; gap: 12px; flex-wrap: wrap; }
+#scoreboard { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
+.score-header { font-size: 0.8rem; color: var(--txt-dim); padding: 4px 10px;
+                background: var(--bg); border-radius: var(--radius);
+                border: 1px solid var(--border); white-space: nowrap; }
 .score-item { display: flex; align-items: center; gap: 6px; font-size: 0.85rem;
               padding: 4px 10px; background: var(--bg); border-radius: var(--radius);
               border: 1px solid var(--border); }

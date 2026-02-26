@@ -1,20 +1,26 @@
-"""An explorer bot that scans first, then moves toward unexplored directions."""
+"""An explorer bot that scans first, then moves toward unexplored directions.
+
+Bots do *not* know their absolute position.  Each bot maintains a local
+map in coordinates relative to its spawn point and tracks its own
+movement via the ``move_succeeded`` feedback.
+"""
 
 from __future__ import annotations
 
 import random
 
 from radiogrid.engine.bot_interface import Bot, Team
-from radiogrid.engine.models import (Action, BotContext, BotOutput, Message,
-                                     TileType)
+from radiogrid.engine.models import (DIRECTION_VECTORS, Action, BotContext,
+                                     BotOutput, Message, TileType)
 from radiogrid.registry import TeamRegistry
 
 
 class ExplorerBot(Bot):
     """Bot that alternates between scanning and moving toward empty tiles.
 
-    Maintains a local memory of known tiles. Shares discovered tile info
-    with teammates via radio messages.
+    Maintains a local memory of known tiles in *relative* coordinates
+    (with the spawn point as origin).  Uses ``move_succeeded`` to keep
+    an accurate relative position.
     """
 
     def __init__(self, rng_seed: int | None = None) -> None:
@@ -22,46 +28,47 @@ class ExplorerBot(Bot):
         self._rng = random.Random(rng_seed)
         self._known_tiles: dict[tuple[int, int], TileType] = {}
         self._last_action: Action = Action.STAY
+        # Relative position (spawn = origin)
+        self._rel_x: int = 0
+        self._rel_y: int = 0
+        # Pending movement delta — set when a move action is chosen,
+        # resolved on the next turn via move_succeeded.
+        self._pending_move: tuple[int, int] | None = None
 
     def decide(self, context: BotContext) -> BotOutput:
         messages_out: list[Message] = []
 
-        # Process scan results and update local map
+        # --- Update relative position from last move attempt ---
+        if self._pending_move is not None:
+            if context.move_succeeded:
+                dx, dy = self._pending_move
+                self._rel_x += dx
+                self._rel_y += dy
+            self._pending_move = None
+
+        # --- Process scan results (stored in relative coords) ---
         if context.scan_result is not None:
-            px, py = context.position
             for (dx, dy), tile_info in context.scan_result.tiles.items():
-                abs_pos = (px + dx, py + dy)
-                self._known_tiles[abs_pos] = tile_info.tile_type
+                rel_pos = (self._rel_x + dx, self._rel_y + dy)
+                self._known_tiles[rel_pos] = tile_info.tile_type
 
-            # Share discoveries with team
-            scan_summary = self._encode_scan(context)
-            if scan_summary:
-                messages_out.append(
-                    Message(
-                        frequency=context.broadcast_frequency,
-                        content=scan_summary,
-                    )
-                )
-
-        # Process incoming messages from teammates
-        for msg in context.inbox:
-            if msg.sender_team_id == self.team_id:
-                self._decode_scan(msg.content)
-
-        # Decide action: scan if we haven't recently, otherwise move
+        # --- Decide action: scan if we haven't recently, otherwise move ---
         if self._last_action != Action.SCAN:
             self._last_action = Action.SCAN
             return BotOutput(action=Action.SCAN, messages=messages_out)
 
         # Find best direction to move
-        action = self._pick_move(context)
+        action = self._pick_move()
         self._last_action = action
+
+        # Track the pending move so we can update position next turn
+        if action in DIRECTION_VECTORS:
+            self._pending_move = DIRECTION_VECTORS[action]
 
         return BotOutput(action=action, messages=messages_out)
 
-    def _pick_move(self, context: BotContext) -> Action:
+    def _pick_move(self) -> Action:
         """Choose a movement direction, preferring unexplored tiles."""
-        px, py = context.position
         candidates: list[tuple[Action, float]] = []
 
         moves = [
@@ -72,7 +79,7 @@ class ExplorerBot(Bot):
         ]
 
         for action, (dx, dy) in moves:
-            target = (px + dx, py + dy)
+            target = (self._rel_x + dx, self._rel_y + dy)
             tile = self._known_tiles.get(target)
 
             if tile == TileType.OBSTACLE or tile == TileType.OUT_OF_BOUNDS:
@@ -98,35 +105,6 @@ class ExplorerBot(Bot):
                 return action
 
         return candidates[-1][0]
-
-    def _encode_scan(self, context: BotContext) -> str:
-        """Encode scan results as a compact string for broadcasting."""
-        if context.scan_result is None:
-            return ""
-        px, py = context.position
-        parts = []
-        for (dx, dy), tile_info in context.scan_result.tiles.items():
-            ax, ay = px + dx, py + dy
-            t = tile_info.tile_type.value[0]  # E, O, T, or S
-            parts.append(f"{ax},{ay}:{t}")
-        return "|".join(parts)
-
-    def _decode_scan(self, content: str) -> None:
-        """Decode a teammate's scan broadcast into local map knowledge."""
-        if not content or "|" not in content and ":" not in content:
-            return
-        type_map = {"E": TileType.EMPTY, "O": TileType.OBSTACLE, "T": TileType.TRAP}
-        for part in content.split("|"):
-            if ":" not in part:
-                continue
-            try:
-                coords, t = part.split(":")
-                x_str, y_str = coords.split(",")
-                pos = (int(x_str), int(y_str))
-                if t in type_map and pos not in self._known_tiles:
-                    self._known_tiles[pos] = type_map[t]
-            except (ValueError, IndexError):
-                continue
 
 
 @TeamRegistry.register(

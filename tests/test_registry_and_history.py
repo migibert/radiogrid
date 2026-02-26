@@ -145,6 +145,8 @@ class TestGameHistory:
         assert "scores" in r
         assert "ranking" in r
         assert "is_draw" in r
+        assert "total_explorable" in r
+        assert "fully_explored_by" in r
         assert r["turns_played"] == 3
 
     def test_history_is_json_serialisable(self):

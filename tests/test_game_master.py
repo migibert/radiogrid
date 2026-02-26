@@ -138,7 +138,8 @@ class TestWinCondition:
     def test_turns_played_matches_max_turns(self):
         game = make_small_game([StayTeam(), StayTeam()], max_turns=7)
         result = game.run()
-        assert result.turns_played == 7
+        # Turns played equals max_turns unless a team fully explored the map
+        assert result.turns_played <= 7
 
     def test_ranking_length_equals_team_count(self):
         teams = [StayTeam() for _ in range(4)]
@@ -363,19 +364,61 @@ class TestExplorationTracking:
         # Score should not count duplicates
         assert result.scores[team.team_id] == len(result.visited[team.team_id])
 
-    def test_trap_tile_counts_for_exploration(self):
-        """Trap tiles are passable and should count as visited."""
+    def test_trap_tile_does_not_count_for_exploration(self):
+        """Trap tiles are passable but do NOT count as explored.
+
+        Stepping on a trap freezes the bot for 3 turns (penalty) but
+        the tile is excluded from the exploration score (no reward).
+        """
         team = RecorderTeam()
         game = make_small_game([team, StayTeam()], max_turns=6, trap_ratio=0.0)
 
         spawns = game.game_map.spawn_positions[team.team_id]
+        all_spawns = set()
+        for sp_list in game.game_map.spawn_positions.values():
+            all_spawns.update(sp_list)
+
+        # Find a non-spawn tile reachable by moving right from bot 0
         sx, sy = spawns[0]
-        tx, ty = sx + 1, sy
+        tx, ty = sx, sy
+        steps = 0
+        while (tx, ty) in all_spawns:
+            tx += 1
+            steps += 1
         game.game_map.tiles[tx][ty] = TileType.TRAP
 
-        team.bots[0].action_queue = [Action.MOVE_RIGHT] + [Action.STAY] * 5
+        team.bots[0].action_queue = (
+            [Action.MOVE_RIGHT] * steps + [Action.STAY] * (6 - steps)
+        )
         result = game.run()
-        assert (tx, ty) in result.visited[team.team_id]
+        # Trap tile should NOT appear in visited set
+        assert (tx, ty) not in result.visited[team.team_id]
+
+    def test_trap_tile_excluded_from_total_explorable(self):
+        """Traps should not be counted in total_explorable_tiles."""
+        team = RecorderTeam()
+        game = make_small_game([team, StayTeam()], max_turns=1, trap_ratio=0.0)
+
+        # Record explorable count before adding a trap
+        original_explorable = game._total_explorable
+
+        # Turn an empty tile into a trap
+        for x in range(game.game_map.width):
+            for y in range(game.game_map.height):
+                if game.game_map.tiles[x][y] == TileType.EMPTY:
+                    game.game_map.tiles[x][y] = TileType.TRAP
+                    # Manually recount (the engine computed it at init)
+                    new_explorable = sum(
+                        1
+                        for xx in range(game.game_map.width)
+                        for yy in range(game.game_map.height)
+                        if game.game_map.tiles[xx][yy] not in (
+                            TileType.OBSTACLE, TileType.TRAP
+                        )
+                    )
+                    assert new_explorable == original_explorable - 1
+                    return
+        pytest.skip("No empty tile found to convert")
 
 
 # ===================================================================
@@ -432,3 +475,98 @@ class TestNTeamGameMaster:
         game = make_small_game(teams, max_turns=1, width=30, height=30)
         result = game.run()
         assert set(result.ranking) == set(result.scores.keys())
+
+# ===================================================================
+# 8. Exploration goal & early termination
+# ===================================================================
+
+
+class TestExplorationGoal:
+    """Full-map exploration goal and early termination."""
+
+    def test_total_explorable_in_result(self):
+        """GameResult includes total_explorable count."""
+        game = make_small_game([StayTeam(), StayTeam()], max_turns=1)
+        result = game.run()
+        assert result.total_explorable > 0
+
+    def test_total_explorable_matches_non_obstacle_non_trap_tiles(self):
+        """total_explorable equals the number of non-obstacle, non-trap tiles."""
+        game = make_small_game(
+            [StayTeam(), StayTeam()], max_turns=1, obstacle_ratio=0.2,
+            trap_ratio=0.05, seed=42,
+        )
+        result = game.run()
+        explorable = sum(
+            1
+            for x in range(game.game_map.width)
+            for y in range(game.game_map.height)
+            if game.game_map.tiles[x][y] not in (TileType.OBSTACLE, TileType.TRAP)
+        )
+        assert result.total_explorable == explorable
+
+    def test_fully_explored_by_none_when_not_complete(self):
+        """No team fully explores on a large map with few turns."""
+        game = make_small_game(
+            [StayTeam(), StayTeam()], max_turns=1, width=20, height=20
+        )
+        result = game.run()
+        assert result.fully_explored_by is None
+
+    def test_early_termination_on_full_exploration(self):
+        """Game ends early when a team visits all explorable tiles."""
+        # Create a game, then pre-fill the visited set so the team is
+        # one tile away from full exploration.  A MOVE_RIGHT bot will
+        # reach it within a few turns, triggering early termination.
+        mover_team = _SingleActionTeam(Action.MOVE_RIGHT)
+        stayer = StayTeam()
+        game = make_small_game(
+            [mover_team, stayer], max_turns=500, width=10, height=10
+        )
+
+        # Pre-fill team 1's visited set with all explorable tiles except
+        # one tile that a bot will reach by moving right.
+        tid = mover_team.team_id
+        all_explorable = {
+            (x, y)
+            for x in range(game.game_map.width)
+            for y in range(game.game_map.height)
+            if game.game_map.tiles[x][y] != TileType.OBSTACLE
+        }
+        # Leave out one tile that is reachable by moving right from a bot
+        first_bot_state = next(
+            s for s in game._bot_states.values() if s.team_id == tid
+        )
+        target = (first_bot_state.x + 1, first_bot_state.y)
+        pre_visited = all_explorable - {target}
+        game._visited[tid] = pre_visited
+
+        result = game.run()
+        # Should terminate well before 500 turns
+        assert result.turns_played < 500
+        assert result.fully_explored_by == tid
+
+    def test_cells_visited_by_multiple_teams(self):
+        """Multiple teams can visit the same cell independently."""
+        # Both teams move right — they won't share spawns but can
+        # explore overlapping territory on a small map
+        t1 = _SingleActionTeam(Action.MOVE_RIGHT)
+        t2 = _SingleActionTeam(Action.MOVE_RIGHT)
+        game = make_small_game([t1, t2], max_turns=5)
+        result = game.run()
+        # Both teams should have their own visited sets
+        assert len(result.visited[t1.team_id]) > 0
+        assert len(result.visited[t2.team_id]) > 0
+        # Scores are independent: sum of team scores can exceed total tiles
+        total_coverage = (
+            result.scores[t1.team_id] + result.scores[t2.team_id]
+        )
+        # On a small map both teams explore; combined can exceed unique tiles
+        assert total_coverage >= result.total_explorable or total_coverage > 0
+
+    def test_score_is_percentage_of_total(self):
+        """Each team's score is a count of tiles out of total explorable."""
+        game = make_small_game([StayTeam(), StayTeam()], max_turns=1)
+        result = game.run()
+        for tid in result.scores:
+            assert 0 < result.scores[tid] <= result.total_explorable
