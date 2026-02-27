@@ -231,27 +231,27 @@ def _flood_fill(game_map: GameMap, start: tuple[int, int]) -> set[tuple[int, int
 
 def _is_connected(game_map: GameMap, start: tuple[int, int]) -> bool:
     """Check if all non-obstacle tiles are reachable from the given start position."""
-    all_passable = {
-        (x, y)
+    passable_count = sum(
+        1
         for x in range(game_map.width)
         for y in range(game_map.height)
         if game_map.tiles[x][y] != TileType.OBSTACLE
-    }
+    )
 
-    if not all_passable:
+    if passable_count == 0:
         return True
 
     reachable = _flood_fill(game_map, start)
-    return reachable == all_passable
+    return len(reachable) == passable_count
 
 
 def _ensure_connectivity(
     game_map: GameMap, start: tuple[int, int], rng: random.Random
 ) -> None:
     """Remove obstacles until all non-obstacle tiles are connected."""
-    while not _is_connected(game_map, start):
-        reachable = _flood_fill(game_map, start)
+    reachable = _flood_fill(game_map, start)
 
+    while True:
         unreachable_tile = None
         for x in range(game_map.width):
             for y in range(game_map.height):
@@ -268,6 +268,7 @@ def _ensure_connectivity(
             break
 
         _connect_via_obstacle_removal(game_map, unreachable_tile, reachable)
+        reachable = _flood_fill(game_map, start)
 
 
 def _connect_via_obstacle_removal(

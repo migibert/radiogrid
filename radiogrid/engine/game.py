@@ -164,8 +164,8 @@ class Game:
 
         # History recording
         self._snapshots: list[dict] = []
-        self._prev_visited: dict[int, set[tuple[int, int]]] = {
-            tid: set(self._visited[tid]) for tid in self._team_ids
+        self._new_visits_this_turn: dict[int, list[tuple[int, int]]] = {
+            tid: [] for tid in self._team_ids
         }
         self._initial_snapshot = self._capture_initial_state()
         self._result: GameResult | None = None
@@ -253,10 +253,15 @@ class Game:
 
         # Step 4 — Update exploration scores (R20-R22)
         # Traps are passable but do NOT count as explored (penalty only).
+        for tid in self._team_ids:
+            self._new_visits_this_turn[tid].clear()
         for state in self._bot_states.values():
             tile = self.game_map.get_tile(state.x, state.y)
             if tile not in (TileType.OBSTACLE, TileType.TRAP):
-                self._visited[state.team_id].add((state.x, state.y))
+                pos = (state.x, state.y)
+                if pos not in self._visited[state.team_id]:
+                    self._visited[state.team_id].add(pos)
+                    self._new_visits_this_turn[state.team_id].append(pos)
 
         # Check for full map exploration
         if self._fully_explored_by is None:
@@ -264,6 +269,11 @@ class Game:
                 if len(self._visited[tid]) >= self._total_explorable:
                     self._fully_explored_by = tid
                     break  # first team checked wins ties within a turn
+
+        # Build position index for efficient scan lookups
+        pos_index: dict[tuple[int, int], list[_BotState]] = {}
+        for s in self._bot_states.values():
+            pos_index.setdefault((s.x, s.y), []).append(s)
 
         # Step 5 — Scan results (built now, delivered next turn via context)
         for bid, out in outputs.items():
@@ -273,7 +283,7 @@ class Game:
                 if state.frozen_turns_remaining > 0 and bid not in just_trapped:
                     # Frozen from a previous turn — still allowed to scan per R10
                     pass
-                state.scan_result = self._build_scan_result(state.x, state.y)
+                state.scan_result = self._build_scan_result(state.x, state.y, pos_index)
 
         # Step 6 — Communication (R13-R19)
         self._dispatch_messages(outputs)
@@ -357,7 +367,12 @@ class Game:
             new_listen_frequency=output.new_listen_frequency,
         )
 
-    def _build_scan_result(self, cx: int, cy: int) -> ScanResult:
+    def _build_scan_result(
+        self,
+        cx: int,
+        cy: int,
+        pos_index: dict[tuple[int, int], list[_BotState]],
+    ) -> ScanResult:
         """Build scan result for the 8 tiles surrounding (cx, cy)."""
         tiles: dict[tuple[int, int], TileInfo] = {}
         for dx in (-1, 0, 1):
@@ -368,17 +383,16 @@ class Game:
                 tile_type = self.game_map.get_tile(nx, ny)
                 bots_here: list[BotInfo] = []
                 if tile_type != TileType.OUT_OF_BOUNDS:
-                    for s in self._bot_states.values():
-                        if s.x == nx and s.y == ny:
-                            bots_here.append(
-                                BotInfo(
-                                    id=s.bot.id,
-                                    team_id=s.team_id,
-                                    broadcast_frequency=s.broadcast_frequency,
-                                    listen_frequency=s.listen_frequency,
-                                    frozen_turns_remaining=s.frozen_turns_remaining,
-                                )
+                    for s in pos_index.get((nx, ny), ()):
+                        bots_here.append(
+                            BotInfo(
+                                id=s.bot.id,
+                                team_id=s.team_id,
+                                broadcast_frequency=s.broadcast_frequency,
+                                listen_frequency=s.listen_frequency,
+                                frozen_turns_remaining=s.frozen_turns_remaining,
                             )
+                        )
                 tiles[(dx, dy)] = TileInfo(tile_type=tile_type, bots=bots_here)
         return ScanResult(tiles=tiles)
 
@@ -413,6 +427,11 @@ class Game:
                         and msg.sender_team_id in all_team_ids):
                     self._team_stats[real_tid].spoofed_messages_sent += 1
 
+        # Build frequency → listeners index for efficient delivery
+        freq_index: dict[int, list[_BotState]] = {}
+        for state in self._bot_states.values():
+            freq_index.setdefault(state.listen_frequency, []).append(state)
+
         # Deliver to matching inboxes and track receive stats.
         # Receive counts are per *unique message* reaching a team, not
         # per bot‑inbox insertion (a single message heard by 5 bots on
@@ -422,10 +441,9 @@ class Game:
                           and msg.sender_team_id != real_tid
                           and msg.sender_team_id in all_team_ids)
             teams_reached: set[int] = set()
-            for state in self._bot_states.values():
-                if state.listen_frequency == msg.frequency:
-                    state.inbox.append(msg)
-                    teams_reached.add(state.team_id)
+            for state in freq_index.get(msg.frequency, ()):
+                state.inbox.append(msg)
+                teams_reached.add(state.team_id)
             # Update per-team stats once per team per message
             for recv_tid in teams_reached:
                 recv_ts = self._team_stats[recv_tid]
@@ -486,10 +504,9 @@ class Game:
 
         new_visits: dict[str, list[list[int]]] = {}
         for tid in self._team_ids:
-            prev = self._prev_visited.get(tid, set())
-            current = self._visited[tid]
-            new_visits[str(tid)] = [[x, y] for x, y in current - prev]
-            self._prev_visited[tid] = set(current)
+            new_visits[str(tid)] = [
+                [x, y] for x, y in self._new_visits_this_turn[tid]
+            ]
 
         self._snapshots.append(
             {

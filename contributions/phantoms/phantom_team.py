@@ -326,6 +326,20 @@ class PhantomBot(Bot):
             if msg.content.startswith(_TOKEN):
                 continue  # own team handled by _process_team_inbox
 
+            # ── Register freq as enemy (discovered via interception) ─
+            # Even without a scan, receiving a non-team message on a
+            # probed frequency proves enemies use it.
+            self._enemy_freq_seen[inbox_freq] = ctx.turn_number
+            # Learn team_id from the message metadata when available
+            if (msg.sender_team_id is not None
+                    and msg.sender_team_id != self.team_id):
+                self._freq_team_id[inbox_freq] = msg.sender_team_id
+            # Infer team_id from AP bot-id if still unknown for this freq
+            if inbox_freq not in self._freq_team_id:
+                inferred = self._infer_team_from_content(msg.content)
+                if inferred is not None:
+                    self._freq_team_id[inbox_freq] = inferred
+
             # ── Store as forgery template ────────────────────────
             bucket = self._intercepted_templates.setdefault(inbox_freq, [])
             if len(bucket) < _MAX_TEMPLATES:
@@ -387,6 +401,32 @@ class PhantomBot(Bot):
 
                 except (ValueError, IndexError):
                     pass
+
+    def _infer_team_from_content(self, content: str) -> int | None:
+        """Try to infer enemy team_id from AP bot-id in message content.
+
+        Intercepted AP messages have the form ``AP<bot_id>:<x>,<y>``.
+        Bot IDs are assigned sequentially (5 per team, 1-indexed), so
+        ``team_id = (bot_id - 1) // 5 + 1``.  Returns None if no AP
+        segment is found or the inferred team matches our own.
+        """
+        for segment in content.split(";"):
+            segment = segment.strip()
+            # Strip any leading token (e.g. #CRT#)
+            if "#" in segment:
+                # Find the payload after the last token marker
+                idx = segment.rfind("#")
+                segment = segment[idx + 1:]
+            if len(segment) >= 3 and segment[:2] == "AP":
+                try:
+                    bid_str = segment[2:].split(":")[0]
+                    bid = int(bid_str)
+                    tid = (bid - 1) // 5 + 1
+                    if tid != self.team_id:
+                        return tid
+                except (ValueError, IndexError):
+                    pass
+        return None
 
     def _next_listen_freq(self, ctx: BotContext) -> int:
         """Determine the spy's next listen frequency.
