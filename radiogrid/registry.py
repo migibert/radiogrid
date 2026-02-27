@@ -1,7 +1,7 @@
 """Team registry for discovering and managing team implementations.
 
 Provides a decorator-based registration system and auto-discovery of team
-modules from ``radiogrid/bots/`` and ``contributions/``.
+modules from ``contributions/``.
 
 Usage::
 
@@ -123,26 +123,18 @@ class TeamRegistry:
 
     @classmethod
     def discover(cls) -> None:
-        """Auto-import team modules from ``radiogrid/bots/`` and ``contributions/``.
+        """Auto-import team modules from ``contributions/``.
 
         Each imported module's top-level code runs, triggering any
         ``@TeamRegistry.register`` decorators it contains.
         """
-        # Built-in bots
-        import radiogrid.bots as bots_pkg
-
-        for _importer, modname, _ispkg in pkgutil.iter_modules(bots_pkg.__path__):
-            try:
-                importlib.import_module(f"radiogrid.bots.{modname}")
-            except Exception:
-                pass
-
         # Community contributions
         contributions_dir = Path(__file__).resolve().parent.parent / "contributions"
         if contributions_dir.is_dir():
             project_root = contributions_dir.parent
             if str(project_root) not in sys.path:
                 sys.path.insert(0, str(project_root))
+            # Top-level .py files
             for py_file in sorted(contributions_dir.glob("*.py")):
                 if py_file.name.startswith("_"):
                     continue
@@ -150,6 +142,19 @@ class TeamRegistry:
                     importlib.import_module(f"contributions.{py_file.stem}")
                 except Exception:
                     pass
+            # Subdirectory .py files (one level deep)
+            for sub_dir in sorted(contributions_dir.iterdir()):
+                if not sub_dir.is_dir() or sub_dir.name.startswith(("_", ".")):
+                    continue
+                for py_file in sorted(sub_dir.glob("*.py")):
+                    if py_file.name.startswith("_"):
+                        continue
+                    try:
+                        importlib.import_module(
+                            f"contributions.{sub_dir.name}.{py_file.stem}"
+                        )
+                    except Exception:
+                        pass
 
     # ------------------------------------------------------------------
     # Housekeeping

@@ -192,10 +192,10 @@ Communication is modeled as open radio broadcasting with no built-in addressing 
 |---|---|
 | `frequency` | Integer. The channel on which this message is broadcast. |
 | `content` | String. Arbitrary content, max 256 characters. |
-| `sender_id` | Integer. **Set by the game engine.** Cannot be forged at the field level. |
-| `sender_team_id` | Integer. **Set by the game engine.** Cannot be forged at the field level. |
+| `sender_id` | Integer or None. Convenience field — **not** verified or set by the engine. Bots may put any value here. Default `None` (undeclared). |
+| `sender_team_id` | Integer or None. Convenience field — **not** verified or set by the engine. Bots may put any value here. Default `None` (undeclared). |
 
-**Important:** `sender_id` and `sender_team_id` are injected by the game engine from the actual sender's state. A bot cannot set these fields in its outgoing messages. However, a bot may place a false sender id inside the `content` field as part of a deception strategy.
+**Important:** The game engine does **not** inject or verify `sender_id` or `sender_team_id`. These fields exist for convenience but contain whatever value the sender chooses (default `None`). A value of `None` means the sender chose not to declare its identity. Teams that want authenticated communication must implement their own protocol (e.g. a shared secret token embedded in `content`).
 
 ### 5.3 Sending Rules
 
@@ -217,9 +217,8 @@ The game engine processes messages in this order each turn:
 
 1. Collect all outgoing messages from all bots' `BotOutput.messages`.
 2. Validate each message (length, message count per bot).
-3. Inject `sender_id` and `sender_team_id` from the sending bot's current state.
-4. For each bot, deliver all messages whose `frequency` matches that bot's current `listen_frequency` into its inbox.
-5. A bot receives its own messages if they match its listen frequency (no self-filter).
+3. For each bot, deliver all messages whose `frequency` matches that bot's current `listen_frequency` into its inbox.
+4. A bot receives its own messages if they match its listen frequency (no self-filter).
 
 ### 5.6 Allowed Communication Strategies
 
@@ -310,7 +309,7 @@ These numbered rules are the authoritative game rules. Implementation must compl
 - **R14** — A bot receives all messages broadcast on its current `listen_frequency` this turn.
 - **R15** — A bot can only listen on one frequency per turn.
 - **R16** — Any bot may broadcast on any frequency, including frequencies used by the enemy.
-- **R17** — `sender_id` and `sender_team_id` in received messages are set by the engine and are accurate — they reflect the actual sender.
+- **R17** — `sender_id` and `sender_team_id` fields are convenience fields that the engine does **not** verify or inject — they may contain any value the sender chooses.
 - **R18** — A frozen bot may send and receive messages normally.
 - **R19** — Frequency changes take effect at the start of the following turn.
 
@@ -395,8 +394,8 @@ Message:
     frequency: int                        # channel to broadcast on (outgoing)
                                           # channel received on (incoming)
     content: str                          # max 256 characters
-    sender_id: int                        # set by engine on delivery (read-only)
-    sender_team_id: int                   # set by engine on delivery (read-only)
+    sender_id: Optional[int]                   # convenience; NOT verified by engine (default None)
+    sender_team_id: Optional[int]                # convenience; NOT verified by engine (default None)
 ```
 
 ```
@@ -540,15 +539,15 @@ python run_ui.py --no-browser         # don't auto-open the browser
 ### Run from the CLI
 
 ```bash
-# Default: Random Walkers vs Explorers, 20×20 map, 200 turns
+# Default: Cartographers vs Phantoms, 20×20 map, 200 turns
 python run_game.py
 
 # Custom game
-python run_game.py --team random --team explorer --team random \
+python run_game.py --team cartographers --team phantoms --team rendezvous \
     --width 30 --height 30 --turns 300 --seed 42
 ```
 
-`--team` can be repeated to add any number of teams. Available team keys are discovered automatically from `radiogrid/bots/` and `contributions/`.
+`--team` can be repeated to add any number of teams. Available team keys are discovered automatically from `contributions/`.
 
 ### Run the Tests
 

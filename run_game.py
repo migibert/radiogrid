@@ -10,7 +10,7 @@ Usage examples:
   python run_game.py --team random --team explorer --team random \
       --width 30 --height 30 --turns 300 --seed 42
 
-Available team types: random, explorer
+Available team types are discovered from contributions/.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TYPE",
         help=(
             "Add a team of this type. Can be specified multiple times. "
-            "At least 2 teams required. Default: random vs explorer."
+            "At least 2 teams required. Default: cartographers vs phantoms."
         ),
     )
     parser.add_argument("--width", type=int, default=20, help="Map width (default: 20)")
@@ -57,7 +57,7 @@ def main(argv: list[str] | None = None) -> None:
     TeamRegistry.discover()
     available = TeamRegistry.keys()
 
-    team_names = args.teams or ["random", "explorer"]
+    team_names = args.teams or ["cartographers", "phantoms"]
 
     if len(team_names) < 2:
         parser.error("At least 2 teams are required (use --team multiple times)")

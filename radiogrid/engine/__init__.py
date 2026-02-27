@@ -2,7 +2,8 @@ from radiogrid.engine.bot_interface import Bot, Team
 from radiogrid.engine.game import Game, GameResult
 from radiogrid.engine.map import GameMap
 from radiogrid.engine.models import (Action, BotContext, BotInfo, BotOutput,
-                                     Message, ScanResult, TileInfo, TileType)
+                                     Message, ScanResult, TeamStats, TileInfo,
+                                     TileType)
 
 __all__ = [
     "TileType",
@@ -13,6 +14,7 @@ __all__ = [
     "ScanResult",
     "BotContext",
     "BotOutput",
+    "TeamStats",
     "Bot",
     "Team",
     "Game",

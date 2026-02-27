@@ -53,12 +53,11 @@ class TestTeamRegistry:
         team = TeamRegistry.create_team("factory_test")
         assert isinstance(team, _T)
 
-    def test_discover_finds_builtin_teams(self):
+    def test_discover_finds_contribution_teams(self):
         TeamRegistry.clear()
         TeamRegistry.discover()
         keys = TeamRegistry.keys()
-        assert "random" in keys
-        assert "explorer" in keys
+        assert len(keys) >= 1
 
     def test_clear(self):
         TeamRegistry.clear()
@@ -66,20 +65,15 @@ class TestTeamRegistry:
         # teardown will restore the backup
 
     def test_keys(self):
-        # Ensure builtins are present (idempotent if already registered)
-        TeamRegistry.discover()
-        # If modules were already imported, decorators don't re-fire.
-        # Force-import the modules to trigger registration.
         import importlib
 
-        import radiogrid.bots.explorer_bot as _eb
-        import radiogrid.bots.random_bot as _rb
-        importlib.reload(_rb)
-        importlib.reload(_eb)
+        import contributions.cartographers.cartographer_team as _ct
+        importlib.reload(_ct)
 
+        TeamRegistry.discover()
         keys = TeamRegistry.keys()
         assert isinstance(keys, list)
-        assert len(keys) >= 2
+        assert len(keys) >= 1
 
 
 # ===================================================================

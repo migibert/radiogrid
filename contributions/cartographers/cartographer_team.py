@@ -48,6 +48,8 @@ _TILE_CHAR = {
 }
 _CHAR_TILE = {v: k for k, v in _TILE_CHAR.items()}
 
+_TOKEN = "#CRT#"  # shared secret for message authentication
+
 
 # ── helpers ──────────────────────────────────────────────────────────
 def _manhattan(a: tuple[int, int], b: tuple[int, int]) -> int:
@@ -241,9 +243,9 @@ class CartographerBot(Bot):
 
     def _process_inbox(self, context: BotContext) -> None:
         for msg in context.inbox:
-            if msg.sender_team_id != self.team_id:
+            if not msg.content.startswith(_TOKEN):
                 continue
-            self._decode_message(msg.content)
+            self._decode_message(msg.content[len(_TOKEN):])
 
     def _decode_message(self, content: str) -> None:
         """Parse position (P) and scan (S) messages from teammates.
@@ -307,11 +309,11 @@ class CartographerBot(Bot):
         combined = pos_str
         if scan_str:
             candidate = combined + ";" + scan_str
-            if len(candidate) <= 256:
+            if len(_TOKEN + candidate) <= 256:
                 combined = candidate
             else:
-                msgs.append(Message(frequency=freq, content=scan_str[:256]))
-        msgs.insert(0, Message(frequency=freq, content=combined[:256]))
+                msgs.append(Message(frequency=freq, content=(_TOKEN + scan_str)[:256]))
+        msgs.insert(0, Message(frequency=freq, content=(_TOKEN + combined)[:256]))
         return msgs[:3]
 
     # ── scan cadence ─────────────────────────────────────────────

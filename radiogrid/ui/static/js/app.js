@@ -105,16 +105,6 @@ function bindSetupEvents() {
 function bindViewportEvents() {
   const wrap = $("#canvas-wrap");
 
-  // --- mouse wheel zoom ---
-  wrap.addEventListener("wheel", (e) => {
-    e.preventDefault();
-    const rect = wrap.getBoundingClientRect();
-    const mx = e.clientX - rect.left;
-    const my = e.clientY - rect.top;
-    const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
-    zoomAtPoint(mx, my, factor);
-  }, { passive: false });
-
   // --- drag to pan ---
   wrap.addEventListener("mousedown", (e) => {
     if (e.button !== 0) return;
@@ -343,6 +333,7 @@ async function runGame() {
 
     showVis();
     renderScoreboard();
+    renderStatsPanel();
     resizeCanvas();
 
     // Setup turn slider
@@ -369,6 +360,7 @@ function showSetup() {
   stopAutoplay();
   $("#setup-panel").classList.remove("hidden");
   $("#vis-panel").classList.add("hidden");
+  $("#game-goal").classList.add("hidden");
 }
 
 function showVis() {
@@ -381,46 +373,15 @@ function showVis() {
    6. SCOREBOARD
    ============================================================ */
 function renderScoreboard() {
-  const sb = $("#scoreboard");
-  sb.innerHTML = "";
-
-  // Show exploration target
   const total = history.result.total_explorable;
-  const hdr = document.createElement("div");
-  hdr.className = "score-header";
-  hdr.textContent = `Goal: explore all ${total} tiles`;
-  sb.appendChild(hdr);
-
-  history.teams.forEach((t, i) => {
-    const item = document.createElement("div");
-    item.className = "score-item";
-    item.id = `score-team-${t.id}`;
-
-    const sw = document.createElement("span");
-    sw.className = "swatch";
-    sw.style.background = TEAM_COLOURS[i % TEAM_COLOURS.length];
-
-    const lbl = document.createElement("span");
-    lbl.textContent = t.name;
-
-    const val = document.createElement("span");
-    val.className = "score-value";
-    val.textContent = "0 / " + total + " (0%)";
-
-    item.append(sw, lbl, val);
-    sb.appendChild(item);
-  });
+  const el = $("#game-goal");
+  el.textContent = `Goal: explore all ${total} tiles`;
+  el.classList.remove("hidden");
 }
 
 function updateScores(scores) {
-  const total = history.result.total_explorable;
-  history.teams.forEach((t) => {
-    const el = $(`#score-team-${t.id} .score-value`);
-    if (!el) return;
-    const s = scores[String(t.id)] ?? 0;
-    const pct = total > 0 ? Math.round((s / total) * 100) : 0;
-    el.textContent = `${s} / ${total} (${pct}%)`;
-  });
+  // Scores are now shown per-team in the stats panel;
+  // nothing to update in the scoreboard header.
 }
 
 /* ============================================================
@@ -547,14 +508,12 @@ function drawTurn() {
   });
 
   // Pick the snapshot for bots & scores
-  let bots, scores;
+  let bots;
   if (currentTurn === 0) {
-    bots   = history.initial.bots;
-    scores = history.initial.scores;
+    bots = history.initial.bots;
   } else {
     const snap = history.turns[currentTurn - 1];
-    bots   = snap.bots;
-    scores = snap.scores;
+    bots = snap.bots;
   }
 
   // 4) Draw bots
@@ -583,7 +542,7 @@ function drawTurn() {
   });
 
   // 5) Update UI
-  updateScores(scores);
+  updateStatsPanel();
   const totalTurns = history.turns.length;
   let turnText = `Turn ${currentTurn} / ${totalTurns}`;
   if (history.result.fully_explored_by && currentTurn >= totalTurns) {
@@ -684,3 +643,151 @@ function hexAlpha(hex, alpha) {
   const b = parseInt(hex.slice(5, 7), 16);
   return `rgba(${r},${g},${b},${alpha})`;
 }
+
+/* ============================================================
+   10. TEAM STATS PANEL
+   ============================================================ */
+
+/** Stat definitions: label shown in the UI, key in the team_stats dict,
+ *  and an optional format function. Grouped by section. */
+const STAT_SECTIONS = [
+  {
+    label: "Movement",
+    rows: [
+      { label: "Moves attempted",  key: "moves_attempted" },
+      { label: "Moves failed",     key: "moves_failed",
+        fmt: (v, s) => `${v} (${s.moves_attempted ? Math.round(v / s.moves_attempted * 100) : 0}%)` },
+      { label: "Scans performed",  key: "scans_performed" },
+      { label: "Traps triggered",  key: "traps_triggered" },
+    ],
+  },
+  {
+    label: "Communication",
+    rows: [
+      { label: "Messages sent",          key: "messages_sent" },
+      { label: "Received (own team)",     key: "messages_received_own" },
+      { label: "Received (cross-team)",   key: "messages_received_cross" },
+      { label: "Freq. changes",           key: "frequency_changes" },
+      { label: "Spoofed msgs sent",       key: "spoofed_messages_sent" },
+    ],
+  },
+];
+
+/** Build the stats panel DOM once (called after game load).
+ *  Creates all elements with data-stat attributes so updateStatsPanel()
+ *  can patch values without rebuilding the DOM each frame. */
+function renderStatsPanel() {
+  if (!history || !history.team_stats) return;
+  const panel = $("#stats-panel");
+  panel.innerHTML = "";
+
+  const grid = document.createElement("div");
+  grid.className = "stats-grid";
+
+  history.teams.forEach((team, idx) => {
+    const card = document.createElement("div");
+    card.className = "stats-team";
+
+    // Header
+    const hdr = document.createElement("div");
+    hdr.className = "stats-team-header";
+    const sw = document.createElement("span");
+    sw.className = "swatch";
+    sw.style.background = TEAM_COLOURS[idx % TEAM_COLOURS.length];
+    const name = document.createElement("span");
+    name.textContent = team.name;
+    const pctBadge = document.createElement("span");
+    pctBadge.className = "explore-pct";
+    pctBadge.dataset.team = team.id;
+    pctBadge.textContent = "0%";
+    hdr.append(sw, name, pctBadge);
+    card.appendChild(hdr);
+
+    // Stat sections
+    const table = document.createElement("table");
+    table.className = "stats-table";
+    const tbody = document.createElement("tbody");
+
+    for (const section of STAT_SECTIONS) {
+      const secRow = document.createElement("tr");
+      const secTd = document.createElement("td");
+      secTd.colSpan = 2;
+      secTd.className = "stats-section-label";
+      secTd.textContent = section.label;
+      secRow.appendChild(secTd);
+      tbody.appendChild(secRow);
+
+      for (const row of section.rows) {
+        const tr = document.createElement("tr");
+        const tdLabel = document.createElement("td");
+        tdLabel.textContent = row.label;
+        const tdValue = document.createElement("td");
+        tdValue.dataset.team = team.id;
+        tdValue.dataset.stat = row.key;
+        tdValue.textContent = "0";
+        tr.append(tdLabel, tdValue);
+        tbody.appendChild(tr);
+      }
+    }
+
+    table.appendChild(tbody);
+    card.appendChild(table);
+
+    grid.appendChild(card);
+  });
+
+  panel.appendChild(grid);
+}
+
+/** Patch stat values and sparklines for the current replay turn.
+ *  Reads per-turn snapshots so the panel updates live. */
+function updateStatsPanel() {
+  if (!history || !history.team_stats) return;
+
+  // Determine which stats snapshot to show
+  let turnStats;
+  if (currentTurn === 0) {
+    // Before any turn: use the initial snapshot (all zeroes)
+    turnStats = history.initial.team_stats || null;
+  } else {
+    turnStats = history.turns[currentTurn - 1].team_stats;
+  }
+
+  // Determine which scores snapshot to show
+  let scores;
+  if (currentTurn === 0) {
+    scores = history.initial.scores;
+  } else {
+    scores = history.turns[currentTurn - 1].scores;
+  }
+  const total = history.result.total_explorable;
+
+  history.teams.forEach((team, idx) => {
+    const stats = turnStats ? (turnStats[String(team.id)] || null) : null;
+
+    // Update exploration badge in header
+    const pctEl = document.querySelector(
+      `.explore-pct[data-team="${team.id}"]`
+    );
+    if (pctEl) {
+      const s = scores[String(team.id)] ?? 0;
+      const pct = total > 0 ? Math.round((s / total) * 100) : 0;
+      pctEl.textContent = `${pct}%`;
+    }
+
+    // Update numeric cells
+    for (const section of STAT_SECTIONS) {
+      for (const row of section.rows) {
+        const el = document.querySelector(
+          `td[data-team="${team.id}"][data-stat="${row.key}"]`
+        );
+        if (!el) continue;
+        const raw = stats ? (stats[row.key] ?? 0) : 0;
+        el.textContent = row.fmt ? row.fmt(raw, stats || {}) : String(raw);
+      }
+    }
+
+  });
+}
+
+

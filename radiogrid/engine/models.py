@@ -41,14 +41,18 @@ DIRECTION_VECTORS: dict[Action, tuple[int, int]] = {
 class Message:
     """A radio message sent between bots.
 
-    When sending: bot sets frequency and content only.
-    When receiving: sender_id and sender_team_id are set by the engine.
+    All fields are set by the sending bot.  The game engine does **not**
+    inject or verify any field — ``sender_id`` and ``sender_team_id``
+    are provided for convenience but may contain any value the sender
+    chooses.  ``None`` means the sender chose not to declare its
+    identity.  Teams that need authentication must implement their own
+    protocol (e.g. a shared secret embedded in ``content``).
     """
 
     frequency: int
     content: str
-    sender_id: int = 0
-    sender_team_id: int = 0
+    sender_id: Optional[int] = None
+    sender_team_id: Optional[int] = None
 
 
 @dataclass(frozen=True)
@@ -121,3 +125,91 @@ class BotOutput:
     messages: list[Message] = field(default_factory=list)
     new_broadcast_frequency: Optional[int] = None
     new_listen_frequency: Optional[int] = None
+
+
+@dataclass
+class TeamStats:
+    """Cumulative per-team telemetry collected by the game engine.
+
+    All counters are updated as a side-effect during turn execution and
+    are never exposed to bots.  They are intended for post-game analysis
+    and the visualisation UI.
+
+    Attributes:
+        messages_sent: Total messages broadcast by this team's bots.
+        messages_received_own: Unique messages received from bots of the
+            same team.  A single message heard by multiple bots on the
+            team counts once.
+        messages_received_cross: Unique messages received from bots of
+            another team (eavesdropping via shared frequency).  Counted
+            once per message per receiving team, not per bot.
+        spoofed_messages_sent: Messages where the declared ``sender_team_id``
+            is set to another team's valid id — i.e. the bot is actively
+            impersonating another team.  Leaving ``sender_team_id`` at
+            ``None`` (or setting it to the bot's own team) does NOT count.
+        spoofed_messages_delivered: Subset of spoofed messages that were
+            actually delivered to an opponent's inbox (the target team
+            matches the fake ``sender_team_id``).
+        traps_triggered: Number of times a team bot stepped on a trap tile.
+        turns_frozen: Total bot-turns spent frozen (across all 5 bots).
+        scans_performed: Number of SCAN actions taken.
+        moves_attempted: Number of movement actions attempted.
+        moves_failed: Movement actions that failed (wall / OOB).
+        frequency_changes: Number of broadcast or listen frequency changes.
+        idle_turns: Turns where a bot chose STAY while *not* frozen.
+        exploration_curve: Team explored-tile count recorded at the end of
+            each turn (index 0 = after turn 1).
+    """
+
+    messages_sent: int = 0
+    messages_received_own: int = 0
+    messages_received_cross: int = 0
+    spoofed_messages_sent: int = 0
+    spoofed_messages_delivered: int = 0
+    traps_triggered: int = 0
+    turns_frozen: int = 0
+    scans_performed: int = 0
+    moves_attempted: int = 0
+    moves_failed: int = 0
+    frequency_changes: int = 0
+    idle_turns: int = 0
+    exploration_curve: list[int] = field(default_factory=list)
+
+    def to_dict(self) -> dict:
+        """Return a JSON-serialisable dictionary."""
+        return {
+            "messages_sent": self.messages_sent,
+            "messages_received_own": self.messages_received_own,
+            "messages_received_cross": self.messages_received_cross,
+            "spoofed_messages_sent": self.spoofed_messages_sent,
+            "spoofed_messages_delivered": self.spoofed_messages_delivered,
+            "traps_triggered": self.traps_triggered,
+            "turns_frozen": self.turns_frozen,
+            "scans_performed": self.scans_performed,
+            "moves_attempted": self.moves_attempted,
+            "moves_failed": self.moves_failed,
+            "frequency_changes": self.frequency_changes,
+            "idle_turns": self.idle_turns,
+            "exploration_curve": self.exploration_curve,
+        }
+
+    def snapshot_dict(self) -> dict:
+        """Return a snapshot without the exploration curve.
+
+        Used per-turn in the history so the UI can show live stats
+        during replay without duplicating the curve in every frame.
+        """
+        return {
+            "messages_sent": self.messages_sent,
+            "messages_received_own": self.messages_received_own,
+            "messages_received_cross": self.messages_received_cross,
+            "spoofed_messages_sent": self.spoofed_messages_sent,
+            "spoofed_messages_delivered": self.spoofed_messages_delivered,
+            "traps_triggered": self.traps_triggered,
+            "turns_frozen": self.turns_frozen,
+            "scans_performed": self.scans_performed,
+            "moves_attempted": self.moves_attempted,
+            "moves_failed": self.moves_failed,
+            "frequency_changes": self.frequency_changes,
+            "idle_turns": self.idle_turns,
+        }

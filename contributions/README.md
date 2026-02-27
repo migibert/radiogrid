@@ -1,16 +1,42 @@
 # Contributing Bots to RadioGrid
 
+## Contributed Teams
+
+Each team lives in its own subdirectory with a dedicated `README.md`
+describing its strategy and core algorithms.
+
+| Team | Directory | Key Idea |
+|---|---|---|
+| **Cartographers** | [`cartographers/`](cartographers/) | Frontier exploration with shared absolute map via radio |
+| **Pathfinders** | [`smart/`](smart/) | Dijkstra pathfinding around traps + zone-based territory coordination |
+| **Rendezvous** | [`rendezvous/`](rendezvous/) | Bootstrap shared frame via teammate detection, then border-seeking + zones |
+
+See each team's `README.md` for detailed strategy, radio protocol, and
+algorithm descriptions.
+
+---
+
 ## How to Contribute
 
-1. Create a new Python file in this directory (e.g., `my_team.py`).
-2. Implement a `Bot` subclass and a `Team` subclass.
-3. **Register your team** using the `@TeamRegistry.register` decorator so it
+1. Create a new subdirectory under `contributions/` (e.g., `contributions/my_team/`).
+2. Add an `__init__.py` (can be empty) and your team module (e.g., `my_team.py`).
+3. Implement a `Bot` subclass and a `Team` subclass.
+4. **Register your team** using the `@TeamRegistry.register` decorator so it
    appears in both the CLI and the web UI automatically.
-4. Your team's `initialize()` method must return exactly **5** bot instances.
+5. Your team's `initialize()` method must return exactly **5** bot instances.
+6. Optionally add a `README.md` describing your strategy.
 
 ## Template
 
+```
+contributions/my_team/
+├── __init__.py
+├── my_team.py
+└── README.md        # optional
+```
+
 ```python
+# contributions/my_team/my_team.py
 from radiogrid.engine.bot_interface import Bot, Team
 from radiogrid.engine.models import Action, BotContext, BotOutput, Message
 from radiogrid.registry import TeamRegistry

@@ -33,6 +33,9 @@ body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helve
           border-bottom: 1px solid var(--border); flex-shrink: 0; }
 #header h1 { font-size: 1.4rem; }
 .subtitle { color: var(--txt-dim); font-size: 0.85rem; }
+.game-goal { margin-left: auto; font-size: 0.8rem; color: var(--txt-dim);
+             padding: 4px 10px; background: var(--bg); border-radius: var(--radius);
+             border: 1px solid var(--border); white-space: nowrap; }
 
 /* ---------- layout ---------- */
 main { flex: 1; min-height: 0; display: flex; flex-direction: column;
@@ -47,7 +50,7 @@ main { flex: 1; min-height: 0; display: flex; flex-direction: column;
 
 /* Vis panel — fills available space */
 #vis-panel { flex: 1; min-height: 0; display: flex; flex-direction: column;
-             padding: 12px 16px; margin-bottom: 0; overflow: hidden; }
+             padding: 12px 16px; margin-bottom: 0; overflow-y: auto; }
 
 /* ---------- form elements ---------- */
 fieldset { border: 1px solid var(--border); border-radius: var(--radius);
@@ -88,21 +91,38 @@ select { width: 170px; cursor: pointer; }
 #status-msg.error { color: var(--danger); }
 
 /* ---------- visualisation ---------- */
-#vis-header { display: flex; justify-content: space-between; align-items: flex-start;
-              flex-wrap: wrap; gap: 8px; margin-bottom: 8px; flex-shrink: 0; }
 
-#scoreboard { display: flex; gap: 12px; flex-wrap: wrap; align-items: center; }
-.score-header { font-size: 0.8rem; color: var(--txt-dim); padding: 4px 10px;
-                background: var(--bg); border-radius: var(--radius);
-                border: 1px solid var(--border); white-space: nowrap; }
-.score-item { display: flex; align-items: center; gap: 6px; font-size: 0.85rem;
-              padding: 4px 10px; background: var(--bg); border-radius: var(--radius);
-              border: 1px solid var(--border); }
-.score-item .swatch { width: 10px; height: 10px; border-radius: 50%; }
-.score-item .score-value { font-weight: 700; font-variant-numeric: tabular-nums; }
+/* ---------- stats panel ---------- */
+#stats-panel { flex-shrink: 0; overflow-x: auto; overflow-y: hidden;
+               border: 1px solid var(--border); border-radius: var(--radius);
+               background: var(--bg); margin-bottom: 8px; padding: 10px 14px; }
+
+.stats-grid { display: flex; gap: 16px; min-width: min-content; }
+
+.stats-team { flex: 1; min-width: 220px; max-width: 340px;
+              background: var(--surface); border: 1px solid var(--border);
+              border-radius: var(--radius); padding: 10px 12px; }
+
+.stats-team-header { display: flex; align-items: center; gap: 6px;
+                     margin-bottom: 8px; font-weight: 600; font-size: 0.85rem; }
+.stats-team-header .swatch { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+.explore-pct { margin-left: auto; font-size: 0.75rem; font-weight: 700;
+               color: var(--txt-dim); font-variant-numeric: tabular-nums; }
+
+.stats-table { width: 100%; border-collapse: collapse; font-size: 0.78rem; }
+.stats-table td { padding: 2px 0; }
+.stats-table td:first-child { color: var(--txt-dim); padding-right: 10px; white-space: nowrap; }
+.stats-table td:last-child { text-align: right; font-variant-numeric: tabular-nums;
+                              font-weight: 600; color: var(--txt); }
+
+.stats-section-label { color: var(--accent); font-size: 0.72rem; font-weight: 600;
+                       text-transform: uppercase; letter-spacing: 0.05em;
+                       padding: 6px 0 2px; border-top: 1px solid var(--border);
+                       margin-top: 4px; }
+
 
 /* ---- canvas area (fills remaining space) ---- */
-#canvas-container { position: relative; flex: 1; min-height: 0; overflow: hidden;
+#canvas-container { position: relative; flex: 1; min-height: 60vh; overflow: hidden;
                     border: 1px solid var(--border); border-radius: var(--radius);
                     background: #000; }
 

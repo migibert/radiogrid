@@ -444,8 +444,8 @@ class TestCommunication:
         inbox = t2.bots[0].contexts[1].inbox
         assert all(m.content != "secret" for m in inbox)
 
-    def test_sender_id_injected_by_engine(self):
-        """R17: sender_id and sender_team_id are accurate."""
+    def test_sender_fields_not_injected_by_engine(self):
+        """R17: engine does NOT inject sender_id / sender_team_id."""
         t1 = _MessagingTeam(content="test", freq=1)
         t2 = RecorderTeam(default_frequency=1)
         game = make_small_game([t1, t2], max_turns=2)
@@ -453,8 +453,8 @@ class TestCommunication:
         inbox = t2.bots[0].contexts[1].inbox
         for msg in inbox:
             if msg.content == "test":
-                assert msg.sender_id > 0
-                assert msg.sender_team_id == t1.team_id
+                assert msg.sender_id is None
+                assert msg.sender_team_id is None
 
     def test_self_delivery(self):
         """A bot receives its own message if frequencies match."""
@@ -497,9 +497,10 @@ class TestCommunication:
 
         # Each SpamBot sent 5 messages, but only 3 should arrive per bot
         inbox = observer.bots[0].contexts[1].inbox
-        # Count messages from first spam bot
-        from_first = [m for m in inbox if m.sender_id == t.bots[0].id]
-        assert len(from_first) <= 3
+        from_spam = [m for m in inbox if m.content.startswith("msg")]
+        # 5 bots × 3 max each = 15; msg3 and msg4 should be dropped
+        assert len(from_spam) <= 15
+        assert all(m.content in ("msg0", "msg1", "msg2") for m in from_spam)
 
     def test_message_content_max_length(self):
         """Messages longer than 256 chars are discarded."""
@@ -836,9 +837,8 @@ class TestExceptionHandling:
         game.run()
         # Observer should not get messages from crashing bot
         inbox = observer.bots[0].contexts[1].inbox
-        crash_bot_id = 1  # first bot created
-        crash_msgs = [m for m in inbox if m.sender_id == crash_bot_id]
-        assert len(crash_msgs) == 0
+        # Crash bot throws before returning; StayBots send nothing
+        assert len(inbox) == 0
 
 
 # ===================================================================
