@@ -375,7 +375,7 @@ function showVis() {
 function renderScoreboard() {
   const total = history.result.total_explorable;
   const el = $("#game-goal");
-  el.textContent = `Goal: explore all ${total} tiles`;
+  el.textContent = `Goal: discover all ${total} tiles`;
   el.classList.remove("hidden");
 }
 
@@ -651,6 +651,15 @@ function hexAlpha(hex, alpha) {
 /** Stat definitions: label shown in the UI, key in the team_stats dict,
  *  and an optional format function. Grouped by section. */
 const STAT_SECTIONS = [
+  {
+    label: "Discovery",
+    rows: [
+      { label: "Tiles reported",   key: "tiles_reported" },
+      { label: "Tiles correct",    key: "tiles_correct" },
+      { label: "Tiles wrong",      key: "tiles_wrong" },
+      { label: "Discovery score",  key: "discovery_score" },
+    ],
+  },
   {
     label: "Movement",
     rows: [

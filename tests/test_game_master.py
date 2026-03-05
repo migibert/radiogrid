@@ -45,33 +45,34 @@ class _SingleActionTeam(Team):
 
 
 class TestScoring:
-    """Exploration scoring rules R20-R23."""
+    """Discovery scoring rules."""
 
-    def test_initial_score_at_least_one(self):
-        """R23: spawn tiles are counted at initialization."""
+    def test_no_discovery_means_zero_score(self):
+        """Teams that don't implement get_discovered_tiles score 0."""
         teams = [StayTeam(), StayTeam()]
         game = make_small_game(teams, max_turns=1)
         result = game.run()
         for tid in result.scores:
-            assert result.scores[tid] >= 1
+            assert result.scores[tid] == 0
 
     def test_staying_does_not_increase_score(self):
-        """R22: revisiting (or staying on) a tile doesn't add score."""
+        """Non-reporting teams stay at 0 regardless of turns."""
         teams = [StayTeam(), StayTeam()]
         game = make_small_game(teams, max_turns=10)
         result = game.run()
         for tid in result.scores:
-            # Spawn tiles only
-            spawn_count = len(game.game_map.spawn_positions[tid])
-            assert result.scores[tid] == spawn_count
+            assert result.scores[tid] == 0
 
-    def test_moving_increases_score(self):
-        """Moving to new tiles should increase score."""
-        mover = _SingleActionTeam(Action.MOVE_RIGHT)
+    def test_reporting_correct_tiles_scores(self):
+        """Reporting correct tiles yields a positive score."""
+        correct_team = _CorrectDiscoveryTeam()
         stayer = StayTeam()
-        game = make_small_game([mover, stayer], max_turns=5)
+        game = make_small_game([correct_team, stayer], max_turns=1)
+        correct_team._game_map = game.game_map
+
         result = game.run()
-        assert result.scores[mover.team_id] > result.scores[stayer.team_id]
+        assert result.scores[correct_team.team_id] > 0
+        assert result.scores[stayer.team_id] == 0
 
     def test_revisit_same_tile_no_extra_score(self):
         """R22: back-and-forth doesn't double-count."""
@@ -97,8 +98,8 @@ class TestScoring:
         # Each bot visits at most 2 tiles (spawn + one right), 5 bots
         # But spawn positions overlap at most 5 spots, so at most ~10
         spawn_count = len(set(game.game_map.spawn_positions[pp.team_id]))
-        # Should be spawn_count + up to 5 (one right per bot)
-        assert result.scores[pp.team_id] <= spawn_count + 5
+        # No discovery reports → score is 0
+        assert result.scores[pp.team_id] == 0
 
     def test_obstacle_tiles_dont_count(self):
         """R21: obstacle tiles cannot be visited."""
@@ -120,11 +121,13 @@ class TestWinCondition:
     """Game result and ranking logic."""
 
     def test_higher_score_wins(self):
-        mover = _SingleActionTeam(Action.MOVE_RIGHT)
+        correct_team = _CorrectDiscoveryTeam()
         stayer = StayTeam()
-        game = make_small_game([mover, stayer], max_turns=5)
+        game = make_small_game([correct_team, stayer], max_turns=5)
+        correct_team._game_map = game.game_map
         result = game.run()
-        assert result.ranking[0] == mover.team_id
+        assert result.ranking[0] == correct_team.team_id
+        assert result.scores[correct_team.team_id] > result.scores[stayer.team_id]
 
     def test_draw_when_scores_equal(self):
         """Equal scores → is_draw = True."""
@@ -314,13 +317,14 @@ class TestGameResult:
         for v in result.visited.values():
             assert isinstance(v, frozenset)
 
-    def test_scores_match_visited_count(self):
+    def test_default_teams_score_zero(self):
+        """Teams that don't implement get_discovered_tiles score 0."""
         game = make_small_game(
             [_SingleActionTeam(Action.MOVE_RIGHT), StayTeam()], max_turns=5
         )
         result = game.run()
         for tid in result.scores:
-            assert result.scores[tid] == len(result.visited[tid])
+            assert result.scores[tid] == 0
 
     def test_result_is_frozen(self):
         game = make_small_game([StayTeam(), StayTeam()], max_turns=1)
@@ -356,13 +360,15 @@ class TestExplorationTracking:
         assert len(mover_extra) > 0
 
     def test_multiple_bots_visiting_same_tile(self):
-        """When multiple bots from same team visit same tile, counted once."""
+        """When multiple bots from same team visit same tile, counted once in visited."""
         # All bots move right — they all visit the same column of tiles
         team = _SingleActionTeam(Action.MOVE_RIGHT)
         game = make_small_game([team, StayTeam()], max_turns=3)
         result = game.run()
-        # Score should not count duplicates
-        assert result.scores[team.team_id] == len(result.visited[team.team_id])
+        # Visited set has no duplicates (set by nature)
+        assert len(result.visited[team.team_id]) > 0
+        # Without discovery reports, score is 0
+        assert result.scores[team.team_id] == 0
 
     def test_trap_tile_does_not_count_for_exploration(self):
         """Trap tiles are passable but do NOT count as explored.
@@ -430,15 +436,19 @@ class TestNTeamGameMaster:
     """Game-master tests specific to N-team support."""
 
     def test_three_team_independent_scoring(self):
-        """3 teams each exploring independently."""
-        t1 = _SingleActionTeam(Action.MOVE_RIGHT)
+        """3 teams: discovery team beats non-reporting teams."""
+        t1 = _CorrectDiscoveryTeam()
         t2 = _SingleActionTeam(Action.MOVE_DOWN)
         t3 = StayTeam()
         game = make_small_game([t1, t2, t3], max_turns=5, width=20, height=20)
+        t1._game_map = game.game_map
         result = game.run()
-        # Movers should beat stayer
+        # Discovery reporter beats non-reporting teams
         assert result.scores[t1.team_id] > result.scores[t3.team_id]
-        assert result.scores[t2.team_id] > result.scores[t3.team_id]
+        assert result.scores[t1.team_id] > result.scores[t2.team_id]
+        # Non-reporting teams both score 0
+        assert result.scores[t2.team_id] == 0
+        assert result.scores[t3.team_id] == 0
 
     def test_six_team_game_completes(self):
         """6 teams should work without errors."""
@@ -513,38 +523,42 @@ class TestExplorationGoal:
         result = game.run()
         assert result.fully_explored_by is None
 
-    def test_early_termination_on_full_exploration(self):
-        """Game ends early when a team visits all explorable tiles."""
-        # Create a game, then pre-fill the visited set so the team is
-        # one tile away from full exploration.  A MOVE_RIGHT bot will
-        # reach it within a few turns, triggering early termination.
-        mover_team = _SingleActionTeam(Action.MOVE_RIGHT)
+    def test_early_termination_on_full_discovery(self):
+        """Game ends early when a team correctly reports all explorable tiles."""
+        from radiogrid.engine.models import TileType
+
+        class _DiscoveryTeam(Team):
+            """Team that discovers the full map and reports it."""
+            def __init__(self):
+                super().__init__()
+                self._game_map = None
+
+            def initialize(self) -> list[Bot]:
+                return [_SingleActionBot(Action.MOVE_RIGHT) for _ in range(5)]
+
+            def get_discovered_tiles(self) -> dict[tuple[int, int], TileType]:
+                if self._game_map is None:
+                    return {}
+                gm = self._game_map
+                return {
+                    (x, y): gm.tiles[x][y]
+                    for x in range(gm.width)
+                    for y in range(gm.height)
+                    if gm.tiles[x][y] not in (TileType.OBSTACLE, TileType.TRAP)
+                }
+
+        dt = _DiscoveryTeam()
         stayer = StayTeam()
         game = make_small_game(
-            [mover_team, stayer], max_turns=500, width=10, height=10
+            [dt, stayer], max_turns=500, width=10, height=10
         )
-
-        # Pre-fill team 1's visited set with all explorable tiles except
-        # one tile that a bot will reach by moving right.
-        tid = mover_team.team_id
-        all_explorable = {
-            (x, y)
-            for x in range(game.game_map.width)
-            for y in range(game.game_map.height)
-            if game.game_map.tiles[x][y] != TileType.OBSTACLE
-        }
-        # Leave out one tile that is reachable by moving right from a bot
-        first_bot_state = next(
-            s for s in game._bot_states.values() if s.team_id == tid
-        )
-        target = (first_bot_state.x + 1, first_bot_state.y)
-        pre_visited = all_explorable - {target}
-        game._visited[tid] = pre_visited
+        # Give the team access to the real map (simulating perfect scanning)
+        dt._game_map = game.game_map
 
         result = game.run()
-        # Should terminate well before 500 turns
+        # Should terminate on turn 1 since the report is complete and correct
         assert result.turns_played < 500
-        assert result.fully_explored_by == tid
+        assert result.fully_explored_by == dt.team_id
 
     def test_cells_visited_by_multiple_teams(self):
         """Multiple teams can visit the same cell independently."""
@@ -557,16 +571,187 @@ class TestExplorationGoal:
         # Both teams should have their own visited sets
         assert len(result.visited[t1.team_id]) > 0
         assert len(result.visited[t2.team_id]) > 0
-        # Scores are independent: sum of team scores can exceed total tiles
-        total_coverage = (
-            result.scores[t1.team_id] + result.scores[t2.team_id]
-        )
-        # On a small map both teams explore; combined can exceed unique tiles
-        assert total_coverage >= result.total_explorable or total_coverage > 0
+        # Without discovery reports, both score 0
+        assert result.scores[t1.team_id] == 0
+        assert result.scores[t2.team_id] == 0
 
-    def test_score_is_percentage_of_total(self):
-        """Each team's score is a count of tiles out of total explorable."""
-        game = make_small_game([StayTeam(), StayTeam()], max_turns=1)
+    def test_score_bounded_by_total_explorable(self):
+        """A discovery team's score cannot exceed total_explorable."""
+        correct_team = _CorrectDiscoveryTeam()
+        stayer = StayTeam()
+        game = make_small_game([correct_team, stayer], max_turns=1)
+        correct_team._game_map = game.game_map
         result = game.run()
         for tid in result.scores:
-            assert 0 < result.scores[tid] <= result.total_explorable
+            assert 0 <= result.scores[tid] <= result.total_explorable
+
+
+# ===================================================================
+# 9. Discovery scoring
+# ===================================================================
+
+
+class _DiscoveryBot(Bot):
+    """Bot that stays put — discovery logic is in the team."""
+
+    def decide(self, context: BotContext) -> BotOutput:
+        return BotOutput(action=Action.STAY)
+
+
+class _CorrectDiscoveryTeam(Team):
+    """Reports all tiles it has physically visited with correct types."""
+
+    def __init__(self):
+        super().__init__()
+        self._game_map = None  # injected by test
+
+    def initialize(self) -> list[Bot]:
+        return [_DiscoveryBot() for _ in range(5)]
+
+    def get_discovered_tiles(self) -> dict[tuple[int, int], TileType]:
+        if self._game_map is None:
+            return {}
+        gm = self._game_map
+        return {
+            (x, y): gm.tiles[x][y]
+            for x in range(gm.width)
+            for y in range(gm.height)
+            if gm.tiles[x][y] not in (TileType.OBSTACLE, TileType.TRAP)
+        }
+
+
+class _WrongDiscoveryTeam(Team):
+    """Reports all positions but with wrong tile types."""
+
+    def __init__(self):
+        super().__init__()
+        self._game_map = None
+
+    def initialize(self) -> list[Bot]:
+        return [_DiscoveryBot() for _ in range(5)]
+
+    def get_discovered_tiles(self) -> dict[tuple[int, int], TileType]:
+        if self._game_map is None:
+            return {}
+        gm = self._game_map
+        # Report every explorable tile as OBSTACLE (always wrong)
+        return {
+            (x, y): TileType.OBSTACLE
+            for x in range(gm.width)
+            for y in range(gm.height)
+            if gm.tiles[x][y] not in (TileType.OBSTACLE, TileType.TRAP)
+        }
+
+
+class _CrashingDiscoveryTeam(Team):
+    """Team whose get_discovered_tiles raises an exception."""
+
+    def initialize(self) -> list[Bot]:
+        return [_DiscoveryBot() for _ in range(5)]
+
+    def get_discovered_tiles(self) -> dict[tuple[int, int], TileType]:
+        raise RuntimeError("oops")
+
+
+class TestDiscoveryScoring:
+    """Discovery-based scoring mechanics."""
+
+    def test_correct_reports_increase_score(self):
+        """Reporting tiles correctly yields a score equal to total explorable."""
+        correct_team = _CorrectDiscoveryTeam()
+        stayer = StayTeam()
+        game = make_small_game([correct_team, stayer], max_turns=1)
+        correct_team._game_map = game.game_map
+
+        result = game.run()
+        # Correct team reports the full map correctly → score = total explorable
+        assert result.scores[correct_team.team_id] == result.total_explorable
+        # Stayer reports nothing → score = 0
+        assert result.scores[stayer.team_id] == 0
+
+    def test_wrong_reports_penalise_score(self):
+        """Reporting tiles incorrectly incurs a 1:1 penalty, floored at 0."""
+        wrong_team = _WrongDiscoveryTeam()
+        stayer = StayTeam()
+        game = make_small_game([wrong_team, stayer], max_turns=1)
+        wrong_team._game_map = game.game_map
+
+        result = game.run()
+        # All reports are wrong → correct=0, wrong=total → max(0, 0 - total) = 0
+        assert result.scores[wrong_team.team_id] == 0
+
+    def test_no_report_equals_zero(self):
+        """A team that returns {} scores 0."""
+        stayer1 = StayTeam()
+        stayer2 = StayTeam()
+        game = make_small_game([stayer1, stayer2], max_turns=3)
+        result = game.run()
+        for tid in result.scores:
+            assert result.scores[tid] == 0
+
+    def test_crashing_get_discovered_tiles_handled(self):
+        """Exception in get_discovered_tiles treated as empty report."""
+        crash_team = _CrashingDiscoveryTeam()
+        stayer = StayTeam()
+        game = make_small_game([crash_team, stayer], max_turns=3)
+        result = game.run()
+        # Should complete without errors; score = 0 (no valid report)
+        assert result.turns_played == 3
+        assert result.scores[crash_team.team_id] == 0
+
+    def test_discovery_stats_recorded(self):
+        """TeamStats should contain discovery-related counters."""
+        correct_team = _CorrectDiscoveryTeam()
+        stayer = StayTeam()
+        game = make_small_game([correct_team, stayer], max_turns=1)
+        correct_team._game_map = game.game_map
+
+        result = game.run()
+        ts = result.team_stats[correct_team.team_id]
+        assert ts.tiles_reported == result.total_explorable
+        assert ts.tiles_correct == result.total_explorable
+        assert ts.tiles_wrong == 0
+        assert ts.discovery_score == result.total_explorable
+        assert len(ts.discovery_curve) == 1
+
+    def test_discovery_curve_tracks_per_turn(self):
+        """Discovery curve should have one entry per turn."""
+        correct_team = _CorrectDiscoveryTeam()
+        stayer = StayTeam()
+        game = make_small_game([correct_team, stayer], max_turns=5)
+        correct_team._game_map = game.game_map
+
+        result = game.run()
+        ts = result.team_stats[correct_team.team_id]
+        assert len(ts.discovery_curve) == result.turns_played
+
+    def test_score_floors_at_zero(self):
+        """Discovery score can never go below 0."""
+        wrong_team = _WrongDiscoveryTeam()
+        stayer = StayTeam()
+        game = make_small_game([wrong_team, stayer], max_turns=5)
+        wrong_team._game_map = game.game_map
+
+        result = game.run()
+        assert result.scores[wrong_team.team_id] >= 0
+
+    def test_early_termination_requires_full_correct_report(self):
+        """Only a complete and fully correct report triggers early termination."""
+        # A team that reports all tiles but all wrong should NOT trigger
+        wrong_team = _WrongDiscoveryTeam()
+        stayer = StayTeam()
+        game = make_small_game([wrong_team, stayer], max_turns=5)
+        wrong_team._game_map = game.game_map
+
+        result = game.run()
+        assert result.fully_explored_by is None
+        assert result.turns_played == 5
+
+    def test_no_feedback_to_team(self):
+        """Teams should receive no discovery score feedback via BotContext."""
+        team = RecorderTeam()
+        game = make_small_game([team, StayTeam()], max_turns=3)
+        game.run()
+        for ctx in team.bots[0].contexts:
+            assert not hasattr(ctx, 'team_explored_count')
+            assert not hasattr(ctx, 'discovery_score')

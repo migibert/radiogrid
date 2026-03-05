@@ -9,11 +9,23 @@ Strategy overview
   gossip to compute its position in a *shared* relative coordinate
   frame (anchored at the lowest-ID bot's spawn = origin).
 
-**Phase 2 — Collaborative exploration:**
-  Using the shared frame, bots immediately share scan data and peer
-  positions over radio — no border-based localisation needed.
-  Frontier targeting + BFS pathfinding steer each bot toward the
-  unexplored area farthest from its peers.
+**Phase 2 — Directed border-seeking:**
+  After bootstrap, bots 0–3 are each assigned a cardinal direction
+  (N/S/W/E) and bias their frontier selection toward that border.
+  When a bot detects ``OUT_OF_BOUNDS`` it resolves the corresponding
+  axis.  The shared→absolute translation delta is broadcast over
+  radio so *all* teammates resolve that axis instantly — only two
+  bots (one per axis) need to actually reach a border.
+
+  As a fallback, once a bot has resolved one axis it redirects toward
+  the perpendicular border to find the second axis itself.
+
+**Phase 3 — Collaborative exploration:**
+  Once both axes are resolved a bot promotes its map to absolute
+  coordinates.  It then uses zone-based coordination (5 vertical
+  strips), Dijkstra pathfinding (trap-aware), and peer-avoidance
+  frontier scoring — same as the Smart Coordinators but with the
+  10–25 turn head start from the shared frame.
 
 The bootstrap costs only ~2 scan turns (which also gather useful local
 tile data), after which the team collaborates as effectively as a fully
@@ -131,6 +143,11 @@ class RendezvousBot(Bot):
         self._abs_localized: bool = False
         self._abs_promoted: bool = False
         self._border_dir: tuple[int, int] | None = None  # assigned seek direction
+        # Shared→absolute translation delta per axis.  The delta is the
+        # same for every bot in the shared frame, so a single broadcast
+        # lets all teammates resolve that axis without visiting the border.
+        self._shared_abs_delta_x: int | None = None
+        self._shared_abs_delta_y: int | None = None
 
         # ── Zone coordination ────────────────────────────────────
         self._map_w: int = 0
@@ -210,17 +227,21 @@ class RendezvousBot(Bot):
                 else:
                     return BotOutput(action=Action.SCAN, messages=bootstrap_msgs)
 
+        # ── Explore inbox (before localisation — may carry axis deltas) ─
+        self._process_explore_inbox(ctx)
+
         # ── Localisation ──────────────────────────────────────────
         self._try_localize_from_scan(ctx)
         if self._abs_localized and not self._abs_promoted:
             self._promote_to_absolute(ctx)
+        # After resolving one axis, redirect toward the other border.
+        self._update_border_dir()
 
         # ── Zone ──────────────────────────────────────────────────
         if self._abs_localized and not self._zone_computed:
             self._compute_zone()
 
-        # ── Explore phase ────────────────────────────────────────
-        self._process_explore_inbox(ctx)
+        # ── Explore messages ─────────────────────────────────────
         explore_msgs = self._build_explore_messages(ctx)
         messages = (bootstrap_msgs + explore_msgs)[:3]
 
@@ -448,8 +469,38 @@ class RendezvousBot(Bot):
                     else ctx.map_width - 1 - self._rel_x
                 )
 
+        # Compute / cache shared→absolute deltas for radio sharing.
+        if self._shared_offset is not None:
+            if self._spawn_abs_x is not None and self._shared_abs_delta_x is None:
+                self._shared_abs_delta_x = self._spawn_abs_x - self._shared_offset[0]
+            if self._spawn_abs_y is not None and self._shared_abs_delta_y is None:
+                self._shared_abs_delta_y = self._spawn_abs_y - self._shared_offset[1]
+
         if self._spawn_abs_x is not None and self._spawn_abs_y is not None:
             self._abs_localized = True
+
+    def _update_border_dir(self) -> None:
+        """Redirect toward the perpendicular border once one axis is found.
+
+        If a bot heading North found the Y axis, there's no reason to
+        keep heading North — switch to West/East to find the X axis.
+        This is a backup for cases where radio sharing of the delta
+        doesn't reach a teammate quickly enough.
+        """
+        if self._abs_localized:
+            return  # both axes resolved — no border-seeking needed
+        if self._spawn_abs_x is not None and self._spawn_abs_y is None:
+            # X resolved, need Y → head North
+            if self._border_dir is None or self._border_dir[1] == 0:
+                self._border_dir = (0, -1)
+                self._target = None
+                self._path = []
+        elif self._spawn_abs_y is not None and self._spawn_abs_x is None:
+            # Y resolved, need X → head West
+            if self._border_dir is None or self._border_dir[0] == 0:
+                self._border_dir = (-1, 0)
+                self._target = None
+                self._path = []
 
     def _promote_to_absolute(self, ctx: BotContext) -> None:
         """Convert map from shared-relative frame to absolute coordinates.
@@ -519,7 +570,7 @@ class RendezvousBot(Bot):
                 if len(segment) < 3:
                     continue
                 prefix = segment[0]
-                if prefix not in ("R", "A"):
+                if prefix not in ("R", "A", "L"):
                     continue
                 # Determine coordinate transform needed
                 if prefix == "A" and not self._abs_promoted:
@@ -534,6 +585,25 @@ class RendezvousBot(Bot):
 
                 tag = segment[1]
                 body = segment[2:]
+                if prefix == "L":
+                    # Localization delta — axis info from a peer.
+                    # Format: LX:<delta> or LY:<delta>
+                    try:
+                        axis = segment[1]
+                        delta = int(segment[3:])
+                        if self._in_shared_frame and self._shared_offset is not None:
+                            if axis == "X" and self._spawn_abs_x is None:
+                                self._spawn_abs_x = delta + self._shared_offset[0]
+                                self._shared_abs_delta_x = delta
+                            elif axis == "Y" and self._spawn_abs_y is None:
+                                self._spawn_abs_y = delta + self._shared_offset[1]
+                                self._shared_abs_delta_y = delta
+                            if self._spawn_abs_x is not None and self._spawn_abs_y is not None:
+                                self._abs_localized = True
+                    except (ValueError, IndexError):
+                        pass
+                    continue
+
                 try:
                     if tag == "P":
                         bid_str, coords = body.split(":")
@@ -580,10 +650,15 @@ class RendezvousBot(Bot):
         pos = self._pos
         msgs: list[Message] = []
 
-        # msg 1: position + zone + traps
+        # msg 1: position + zone + localization deltas + traps
         parts = [f"{pfx}P{self.id}:{pos[0]},{pos[1]}"]
         if self._zone_id >= 0:
             parts.append(f"{pfx}Z{self.id}:{self._zone_id}")
+        # Broadcast axis deltas so all teammates can resolve axes
+        if self._shared_abs_delta_x is not None:
+            parts.append(f"LX:{self._shared_abs_delta_x}")
+        if self._shared_abs_delta_y is not None:
+            parts.append(f"LY:{self._shared_abs_delta_y}")
         if self._known_traps:
             _traps_iter = self._known_traps if len(self._known_traps) <= 20 else list(self._known_traps)[:20]
             trap_body = f"{pfx}T" + "|".join(
@@ -881,12 +956,70 @@ class RendezvousTeam(Team):
     ) -> None:
         super().__init__(default_frequency=default_frequency)
         self._seed = seed
+        self._bots: list[RendezvousBot] = []
 
     def initialize(self) -> list[Bot]:
-        return [
+        self._bots = [
             RendezvousBot(
                 bot_index=i,
                 rng_seed=(self._seed + i if self._seed is not None else None),
             )
             for i in range(5)
         ]
+        return self._bots
+
+    def get_discovered_tiles(self) -> dict[tuple[int, int], TileType]:
+        """Merge all bots' maps into absolute coordinates.
+
+        Bots that completed absolute promotion already have their
+        ``_known`` in absolute coords.  For bots still in the shared
+        frame, we compute the shared→absolute delta from any promoted
+        bot and translate their tiles.  Bots that never achieved a
+        shared frame are skipped (their coords are meaningless).
+
+        Coordinates outside the map boundaries are filtered out to
+        avoid penalising the team for radio-interference artefacts.
+        """
+        merged: dict[tuple[int, int], TileType] = {}
+
+        # Determine map bounds (any bot will have the same values).
+        map_w = map_h = 0
+        for bot in self._bots:
+            if bot._map_w > 0:
+                map_w, map_h = bot._map_w, bot._map_h
+                break
+
+        # Try to derive the shared→absolute translation delta from any
+        # promoted bot (they all share the same delta).
+        abs_delta: tuple[int, int] | None = None
+        for bot in self._bots:
+            if bot._abs_promoted and bot._shared_offset is not None:
+                assert bot._spawn_abs_x is not None and bot._spawn_abs_y is not None
+                abs_delta = (
+                    bot._spawn_abs_x - bot._shared_offset[0],
+                    bot._spawn_abs_y - bot._shared_offset[1],
+                )
+                break
+
+        for bot in self._bots:
+            if bot._abs_promoted:
+                # Already in absolute coordinates
+                for pos, tile in bot._known.items():
+                    if tile is not TileType.OUT_OF_BOUNDS and pos not in merged:
+                        merged[pos] = tile
+            elif bot._in_shared_frame and abs_delta is not None:
+                # Translate shared-frame coords to absolute
+                dx, dy = abs_delta
+                for (sx, sy), tile in bot._known.items():
+                    apos = (sx + dx, sy + dy)
+                    if tile is not TileType.OUT_OF_BOUNDS and apos not in merged:
+                        merged[apos] = tile
+
+        # Filter out coordinates outside the known map boundaries.
+        if map_w > 0:
+            merged = {
+                pos: tile
+                for pos, tile in merged.items()
+                if 0 <= pos[0] < map_w and 0 <= pos[1] < map_h
+            }
+        return merged

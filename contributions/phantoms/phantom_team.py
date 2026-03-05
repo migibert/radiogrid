@@ -1079,12 +1079,42 @@ class PhantomTeam(Team):
     ) -> None:
         super().__init__(default_frequency=default_frequency)
         self._seed = seed
+        self._bots: list[PhantomBot] = []
 
     def initialize(self) -> list[Bot]:
-        return [
+        self._bots = [
             PhantomBot(
                 bot_index=i,
                 rng_seed=(self._seed + i if self._seed is not None else None),
             )
             for i in range(5)
         ]
+        return self._bots
+
+    def get_discovered_tiles(self) -> dict[tuple[int, int], TileType]:
+        """Merge all bots' absolute-coordinate maps.
+
+        Coordinates outside the map boundaries are filtered out to
+        avoid penalising the team for radio-interference artefacts.
+        """
+        merged: dict[tuple[int, int], TileType] = {}
+        for bot in self._bots:
+            if not bot._map_promoted:
+                continue
+            for pos, tile in bot._known.items():
+                if tile is not TileType.OUT_OF_BOUNDS and pos not in merged:
+                    merged[pos] = tile
+
+        # Determine map bounds from any bot that has seen a context.
+        map_w = map_h = 0
+        for bot in self._bots:
+            if bot._map_w > 0:
+                map_w, map_h = bot._map_w, bot._map_h
+                break
+        if map_w > 0:
+            merged = {
+                pos: tile
+                for pos, tile in merged.items()
+                if 0 <= pos[0] < map_w and 0 <= pos[1] < map_h
+            }
+        return merged

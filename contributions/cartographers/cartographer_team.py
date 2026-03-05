@@ -115,6 +115,9 @@ class CartographerBot(Bot):
         self._turns_since_scan: int = 100  # force an early scan
         # Stuck detection
         self._last_positions: list[tuple[int, int]] = []
+        # Map dimensions (set on first decide call)
+        self._map_w: int = 0
+        self._map_h: int = 0
 
     # ── coordinate helpers ───────────────────────────────────────
     @property
@@ -137,6 +140,11 @@ class CartographerBot(Bot):
 
     # ── main entry point ─────────────────────────────────────────
     def decide(self, context: BotContext) -> BotOutput:
+        # Cache map dimensions for bounds filtering in get_discovered_tiles.
+        if self._map_w == 0:
+            self._map_w = context.map_width
+            self._map_h = context.map_height
+
         # ── update relative position ─────────────────────────────
         if self._pending_move is not None:
             if context.move_succeeded:
@@ -510,12 +518,42 @@ class CartographerTeam(Team):
     ) -> None:
         super().__init__(default_frequency=default_frequency)
         self._seed = seed
+        self._bots: list[CartographerBot] = []
 
     def initialize(self) -> list[Bot]:
-        return [
+        self._bots = [
             CartographerBot(
                 bot_index=i,
                 rng_seed=(self._seed + i if self._seed is not None else None),
             )
             for i in range(5)
         ]
+        return self._bots
+
+    def get_discovered_tiles(self) -> dict[tuple[int, int], TileType]:
+        """Merge all bots' absolute-coordinate maps.
+
+        Coordinates outside the map boundaries are filtered out to
+        avoid penalising the team for radio-interference artefacts.
+        """
+        merged: dict[tuple[int, int], TileType] = {}
+        for bot in self._bots:
+            if not bot._map_promoted:
+                continue
+            for pos, tile in bot._known.items():
+                if tile is not TileType.OUT_OF_BOUNDS and pos not in merged:
+                    merged[pos] = tile
+
+        # Determine map bounds from any promoted bot's absolute offset + map dims.
+        map_w = map_h = 0
+        for bot in self._bots:
+            if hasattr(bot, '_map_w') and bot._map_w > 0:
+                map_w, map_h = bot._map_w, bot._map_h
+                break
+        if map_w > 0:
+            merged = {
+                pos: tile
+                for pos, tile in merged.items()
+                if 0 <= pos[0] < map_w and 0 <= pos[1] < map_h
+            }
+        return merged

@@ -2,7 +2,7 @@
 ### A Bot Exploration & Communication Game
 **Complete Game Specification — v1.0**
 
-> **Game Summary:** Two teams of 5 bots compete to explore a randomly generated grid map. The team that has visited the most distinct tiles when time runs out wins. Bots coordinate via a radio frequency system that is open to eavesdropping, spoofing, and deception — making communication strategy central to victory.
+> **Game Summary:** Two or more teams of 5 bots compete to explore and map a randomly generated grid. Teams score by **reporting discovered tiles** — each turn, the engine asks every team what it believes the map looks like, and awards +1 per correct tile and −1 per incorrect tile. Bots must explore, scan, and communicate via a radio frequency system that is open to eavesdropping, spoofing, and deception — making both cartography and communication strategy central to victory.
 >
 > **Target audience:** developers. Each team is a code submission.
 
@@ -33,7 +33,7 @@
 | Bot | An autonomous agent controlled by developer code. |
 | Team | A group of exactly 5 bots sharing a strategy. |
 | Turn | One cycle of the game loop. All bots act simultaneously. |
-| Exploration Score | The number of distinct tiles a team has visited (stepped on). |
+| Exploration Score | The number of correctly reported tiles minus incorrectly reported tiles (min 0). |
 | Frequency | An integer channel identifier used for radio communication. |
 | Frozen | A bot state where the bot cannot move or scan for N turns. |
 | Scan | An action that reveals the contents of the 8 surrounding tiles. |
@@ -48,10 +48,10 @@ The map is a rectangular grid of `W × H` tiles. Dimensions are fixed at game st
 
 | Tile Type | Description |
 |---|---|
-| **Empty** | Passable. Contributes to exploration score when first visited. |
+| **Empty** | Passable. Can be reported for discovery score. |
 | **Obstacle** | Impassable. Bots cannot enter this tile. Not counted for scoring. |
 | **Trap** | Passable but dangerous. Entering this tile freezes the bot for 3 turns. |
-| **Spawn** | A subtype of Empty. Where bots begin the game. Counts for exploration. |
+| **Spawn** | A subtype of Empty. Where bots begin the game. Can be reported for discovery score. |
 
 ### 2.2 Generation
 
@@ -252,8 +252,8 @@ The following are explicitly permitted and considered part of legitimate gamepla
 2. Place each team's 5 bots at their designated spawn tiles (symmetric placement).
 3. Set all bots' `frozen_turns_remaining` to `0`.
 4. Set all bots' `broadcast_frequency` and `listen_frequency` to their team's default frequency.
-5. Mark all spawn tiles as visited for the respective team.
-6. Initialize exploration score to 1 for each team (spawn tiles).
+5. Mark all spawn tiles as visited for the respective team (telemetry only).
+6. Initialize discovery score to 0 for each team.
 
 ### 6.3 Turn Sequence
 
@@ -264,20 +264,22 @@ Each turn executes these steps in order:
 3. Validate each bot's `BotOutput`. Invalid actions are replaced with `STAY`.
 4. Process movement: for each non-frozen bot choosing `MOVE_*`, attempt to move. Movement is blocked by obstacles and map edges. Traps do **not** block movement — they trigger freeze on entry.
 5. Apply trap effects: any bot that just moved onto a trap tile sets `frozen_turns_remaining = 3`.
-6. Update exploration scores: mark newly visited tiles for each team.
-7. Process scan actions: build `ScanResult` for each bot that chose `SCAN`.
-8. Process communication: collect outgoing messages, dispatch to inboxes (see 5.5).
-9. Apply frequency changes: update broadcast and listen frequencies for bots that requested changes.
-10. Decrement `frozen_turns_remaining` for all frozen bots (minimum 0).
-11. Increment turn counter. If turn counter ≥ `MAX_TURNS`, end the game.
+6. Update visited-tile tracking: mark newly visited tiles for each team (telemetry only).
+7. Evaluate discoveries: call each team's `get_discovered_tiles()` and update scores.
+8. Process scan actions: build `ScanResult` for each bot that chose `SCAN`.
+9. Process communication: collect outgoing messages, dispatch to inboxes (see 5.5).
+10. Apply frequency changes: update broadcast and listen frequencies for bots that requested changes.
+11. Decrement `frozen_turns_remaining` for all frozen bots (minimum 0).
+12. Check early termination: if any team correctly reported every explorable tile, end the game.
+13. Increment turn counter. If turn counter ≥ `MAX_TURNS`, end the game.
 
 > **Simultaneous resolution:** All bots act on the state at the start of the turn. Two bots may attempt to move into the same tile; both moves succeed (bots can share tiles).
 
 ### 6.4 Win Condition
 
-The game ends when `MAX_TURNS` is reached. The team with the higher exploration score wins. In case of a tie, the game is declared a draw.
+The game ends when `MAX_TURNS` is reached **or** when a team correctly reports every explorable tile on the map (early termination). The team with the higher discovery score wins. In case of a tie, the game is declared a draw.
 
-**Exploration score** = number of distinct non-obstacle tiles visited by at least one bot from the team.
+**Discovery score** = `max(0, correct_reports − wrong_reports)`, where the engine validates each team's `get_discovered_tiles()` report against the ground-truth map every turn. Tiles omitted from the report carry no penalty.
 
 ---
 
@@ -315,19 +317,22 @@ These numbered rules are the authoritative game rules. Implementation must compl
 
 ### 7.4 Scoring Rules
 
-- **R20** — A tile is considered visited by a team when any bot from that team occupies it at the end of a turn (after movement resolution).
-- **R21** — Only non-obstacle tiles count toward exploration score.
-- **R22** — Revisiting a tile does not increase the score.
-- **R23** — Spawn tiles are counted as visited at initialization.
+- **R20** — Scoring is based entirely on the team's `get_discovered_tiles()` report — physical visits alone do **not** earn points.
+- **R21** — Each correctly reported tile (position + type matches ground truth) earns **+1**.
+- **R22** — Each incorrectly reported tile (wrong type or out-of-bounds) incurs **−1**.
+- **R23** — The discovery score is `max(0, correct − wrong)` — it can never go negative.
+- **R24** — Tiles omitted from the report carry no penalty and no reward.
+- **R25** — The engine does **not** reveal which reports were correct; teams must rely on their own confidence.
+- **R26** — If a team's report covers exactly every explorable tile with zero errors, the game terminates early.
 
 ### 7.5 Fairness & Anti-Cheat Rules
 
-- **R24** — Bots must not access the game engine's internal state objects directly.
-- **R25** — Bots must not access other bots' objects or internal memory.
-- **R26** — Bots must not modify the `BotContext`, `ScanResult`, or `Message` objects they receive.
-- **R27** — Bots may take any action within the bounds of the `BotOutput` interface.
-- **R28** — Spoofing, eavesdropping, and deceptive message content are explicitly **legal**.
-- **R29** — A bot that throws an unhandled exception is treated as returning `STAY` with no messages for that turn. It is not eliminated.
+- **R27** — Bots must not access the game engine's internal state objects directly.
+- **R28** — Bots must not access other bots' objects or internal memory.
+- **R29** — Bots must not modify the `BotContext`, `ScanResult`, or `Message` objects they receive.
+- **R30** — Bots may take any action within the bounds of the `BotOutput` interface.
+- **R31** — Spoofing, eavesdropping, and deceptive message content are explicitly **legal**.
+- **R32** — A bot that throws an unhandled exception is treated as returning `STAY` with no messages for that turn. It is not eliminated.
 
 ---
 
@@ -343,6 +348,12 @@ Team (abstract class):
     default_frequency: int                # initial broadcast/listen frequency for all bots
 
     initialize() -> List[Bot]             # create and return exactly 5 bot instances
+
+    get_discovered_tiles() -> Dict[(int,int), TileType]
+        # Called by the engine at the end of every turn.
+        # Return a mapping of (x, y) -> TileType for tiles you believe
+        # you have discovered.  Each correct entry = +1, each wrong = -1.
+        # Default returns {} (score 0).  Override to score.
 ```
 
 ### 8.2 Bot Interface
@@ -471,7 +482,7 @@ These examples illustrate the strategic depth enabled by the ruleset. They are n
 | `BotContext` | The read-only input object provided to a bot each turn. |
 | `BotOutput` | The output object a bot must return each turn. |
 | `BotInfo` | Snapshot of a detected bot's public state, returned in scan results. |
-| Exploration Score | Distinct passable tiles visited by a team. |
+| Exploration Score | `max(0, correct_reports − wrong_reports)` from `get_discovered_tiles()`. |
 | Frozen | State preventing movement and scanning. Communication still works. |
 | Frequency | Integer channel identifier for radio messages. |
 | Inbox | Messages received by a bot this turn. |

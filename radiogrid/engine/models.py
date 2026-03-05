@@ -99,9 +99,13 @@ class BotContext:
     axis.
 
     ``total_explorable_tiles`` is the number of non-obstacle tiles on
-    the map.  The goal is to be the first team to visit all of them.
-    ``team_explored_count`` tells the bot how many distinct tiles its
-    team has explored so far.
+    the map.  The goal is to be the first team to discover all of them.
+
+    .. note::
+
+       The engine does **not** reveal how many tiles the team has
+       discovered so far.  Teams must track their own exploration
+       progress internally.
     """
 
     frozen_turns_remaining: int
@@ -114,7 +118,6 @@ class BotContext:
     listen_frequency: int = 0
     turn_number: int = 0
     total_explorable_tiles: int = 0
-    team_explored_count: int = 0
 
 
 @dataclass
@@ -159,6 +162,13 @@ class TeamStats:
         idle_turns: Turns where a bot chose STAY while *not* frozen.
         exploration_curve: Team explored-tile count recorded at the end of
             each turn (index 0 = after turn 1).
+        tiles_reported: Total tiles reported via ``get_discovered_tiles``
+            on the most recent call.
+        tiles_correct: Tiles whose reported type matched the real map.
+        tiles_wrong: Tiles whose reported type did NOT match the real map.
+        discovery_score: Current discovery score (physical visits +
+            correct reports - wrong reports, floored at physical visits).
+        discovery_curve: Discovery score recorded at the end of each turn.
     """
 
     messages_sent: int = 0
@@ -174,6 +184,11 @@ class TeamStats:
     frequency_changes: int = 0
     idle_turns: int = 0
     exploration_curve: list[int] = field(default_factory=list)
+    tiles_reported: int = 0
+    tiles_correct: int = 0
+    tiles_wrong: int = 0
+    discovery_score: int = 0
+    discovery_curve: list[int] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         """Return a JSON-serialisable dictionary."""
@@ -191,13 +206,18 @@ class TeamStats:
             "frequency_changes": self.frequency_changes,
             "idle_turns": self.idle_turns,
             "exploration_curve": self.exploration_curve,
+            "tiles_reported": self.tiles_reported,
+            "tiles_correct": self.tiles_correct,
+            "tiles_wrong": self.tiles_wrong,
+            "discovery_score": self.discovery_score,
+            "discovery_curve": self.discovery_curve,
         }
 
     def snapshot_dict(self) -> dict:
-        """Return a snapshot without the exploration curve.
+        """Return a snapshot without the exploration/discovery curves.
 
         Used per-turn in the history so the UI can show live stats
-        during replay without duplicating the curve in every frame.
+        during replay without duplicating the curves in every frame.
         """
         return {
             "messages_sent": self.messages_sent,
@@ -212,4 +232,8 @@ class TeamStats:
             "moves_failed": self.moves_failed,
             "frequency_changes": self.frequency_changes,
             "idle_turns": self.idle_turns,
+            "tiles_reported": self.tiles_reported,
+            "tiles_correct": self.tiles_correct,
+            "tiles_wrong": self.tiles_wrong,
+            "discovery_score": self.discovery_score,
         }

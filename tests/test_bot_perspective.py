@@ -146,15 +146,13 @@ class TestContextBasics:
         ctx = team.bots[0].contexts[0]
         assert ctx.total_explorable_tiles > 0
 
-    def test_team_explored_count_provided(self):
-        """Bots receive their team's current exploration count."""
+    def test_team_explored_count_removed(self):
+        """BotContext should NOT include team_explored_count."""
         team = RecorderTeam()
         game = make_small_game([team, StayTeam()])
         game.run()
         ctx = team.bots[0].contexts[0]
-        # At minimum the spawn tiles are explored
-        assert ctx.team_explored_count >= 1
-        assert ctx.team_explored_count <= ctx.total_explorable_tiles
+        assert not hasattr(ctx, 'team_explored_count')
 
 
 # ===================================================================
@@ -924,7 +922,7 @@ class TestMultiTeam:
         assert len(result.scores) == 5
         for tid in range(1, 6):
             assert tid in result.scores
-            assert result.scores[tid] >= 1  # at least spawn tiles
+            assert result.scores[tid] >= 0  # no discovery reports → 0
 
     def test_n_team_ranking_order(self):
         """Ranking reflects descending score order."""

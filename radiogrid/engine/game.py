@@ -37,16 +37,20 @@ class GameResult:
     """Outcome of a completed game.
 
     Attributes:
-        scores: Mapping from team_id to exploration score.
-        visited: Mapping from team_id to the set of distinct tiles visited.
+        scores: Mapping from team_id to discovery score (the score that
+            determines the winner).  This equals
+            ``max(0, correct_reports - wrong_reports)``.
+        visited: Mapping from team_id to the set of distinct tiles
+            physically visited by that team's bots (telemetry only,
+            does not affect scores).
         ranking: Team ids ordered from highest to lowest score.
                  Teams with equal scores share the same rank position but
                  appear in the list in their original registration order.
         turns_played: Total number of turns that were executed.
         is_draw: True when the top two (or more) teams are tied.
-        total_explorable: Number of non-obstacle tiles on the map.
-        fully_explored_by: Team id of the first team to explore all tiles,
-                           or None if no team achieved full exploration.
+        total_explorable: Number of non-obstacle, non-trap tiles on the map.
+        fully_explored_by: Team id of the first team to correctly report
+                           all explorable tiles, or None.
     """
 
     scores: dict[int, int]
@@ -103,8 +107,10 @@ class Game:
 
         # Assign team ids (1-indexed)
         self._teams: list[Team] = teams
+        self._team_map: dict[int, Team] = {}
         for idx, team in enumerate(teams):
             team.team_id = idx + 1
+            self._team_map[team.team_id] = team
 
         # Create bots and internal state
         self._bot_states: dict[int, _BotState] = {}
@@ -168,6 +174,12 @@ class Game:
             tid: TeamStats() for tid in self._team_ids
         }
 
+        # Per-team discovery scores (updated each turn).
+        # Scores start at 0; only get_discovered_tiles() reports count.
+        self._discovery_scores: dict[int, int] = {
+            tid: 0 for tid in self._team_ids
+        }
+
         # History recording
         self._snapshots: list[dict] = []
         self._new_visits_this_turn: dict[int, list[tuple[int, int]]] = {
@@ -183,9 +195,10 @@ class Game:
     def run(self) -> GameResult:
         """Execute the full game and return the result.
 
-        The game ends when ``max_turns`` are exhausted **or** when a team
-        has visited every explorable (non-obstacle) tile on the map.
-        The team with the most explored tiles wins.
+        The game ends when ``max_turns`` are exhausted **or** when a
+        team correctly reports all explorable tiles via
+        :meth:`~Team.get_discovered_tiles`.  The team with the highest
+        *discovery score* wins.
         """
         for _ in range(self.max_turns):
             self.turn += 1
@@ -281,14 +294,6 @@ class Game:
                     team_visited.add(pos)
                     self._new_visits_this_turn[state.team_id].append(pos)
 
-        # Check for full map exploration
-        if self._fully_explored_by is None:
-            total = self._total_explorable
-            for tid in team_ids:
-                if len(visited[tid]) >= total:
-                    self._fully_explored_by = tid
-                    break
-
         # Build position index for efficient scan lookups
         pos_index: dict[tuple[int, int], list[_BotState]] = {}
         for s in bot_states.values():
@@ -315,18 +320,108 @@ class Game:
         # Step 6 — Communication (R13-R19)
         self._dispatch_messages(outputs)
 
+        # Step 7 — Discovery scoring
+        # Each team reports its believed map; the engine validates
+        # silently and computes the discovery score.
+        self._evaluate_discoveries(team_ids, team_stats, visited)
+
         # Step 8 — Decrement freeze timers (skip just-trapped bots)
         for bid, state in bot_states.items():
             if bid not in just_trapped and state.frozen_turns_remaining > 0:
                 state.frozen_turns_remaining -= 1
                 team_stats[state.team_id].turns_frozen += 1
 
-        # Step 9 — Record exploration curve
+        # Step 9 — Record exploration + discovery curves
         for tid in team_ids:
             team_stats[tid].exploration_curve.append(len(visited[tid]))
+            team_stats[tid].discovery_curve.append(
+                self._discovery_scores[tid]
+            )
 
         # Step 10 — Record snapshot for history replay
         self._record_snapshot(outputs)
+
+    # ------------------------------------------------------------------
+    # Discovery scoring
+    # ------------------------------------------------------------------
+
+    def _evaluate_discoveries(
+        self,
+        team_ids: list[int],
+        team_stats: dict[int, TeamStats],
+        visited: dict[int, set[tuple[int, int]]],
+    ) -> None:
+        """Call each team's ``get_discovered_tiles`` and score results.
+
+        Scoring is based **purely** on what the team reports via
+        ``get_discovered_tiles()``.  Physical visits are tracked for
+        telemetry but do **not** contribute to the score.
+
+        For each team:
+        1.  Each correctly reported tile earns **+1**.
+        2.  Each incorrectly reported tile incurs **-1**.
+        3.  Discovery score = max(0, correct - wrong).
+        4.  If the report covers exactly ``total_explorable`` entries and
+            every entry is correct, the team has fully discovered the map
+            → early termination.
+
+        No feedback is returned to the team.
+        """
+        tiles_grid = self.game_map.tiles
+        gm_w = self.game_map.width
+        gm_h = self.game_map.height
+        total = self._total_explorable
+
+        for tid in team_ids:
+            team = self._team_map[tid]
+
+            # Safely call get_discovered_tiles — default returns {}
+            try:
+                reported = team.get_discovered_tiles()
+            except Exception:
+                reported = {}
+
+            if not reported:
+                # No report → score stays 0
+                self._discovery_scores[tid] = 0
+                ts = team_stats[tid]
+                ts.tiles_reported = 0
+                ts.tiles_correct = 0
+                ts.tiles_wrong = 0
+                ts.discovery_score = 0
+                continue
+
+            correct = 0
+            wrong = 0
+            n_reported = 0
+
+            for (rx, ry), claimed_type in reported.items():
+                n_reported += 1
+                # Tiles outside the map are always wrong
+                if not (0 <= rx < gm_w and 0 <= ry < gm_h):
+                    wrong += 1
+                    continue
+                real_type = tiles_grid[rx][ry]
+                if claimed_type == real_type:
+                    correct += 1
+                else:
+                    wrong += 1
+
+            discovery = max(0, correct - wrong)
+
+            self._discovery_scores[tid] = discovery
+            ts = team_stats[tid]
+            ts.tiles_reported = n_reported
+            ts.tiles_correct = correct
+            ts.tiles_wrong = wrong
+            ts.discovery_score = discovery
+
+            # Early termination check: only consider reports that
+            # claim to be a full map (correct number of entries).
+            if (self._fully_explored_by is None
+                    and n_reported == total
+                    and wrong == 0):
+                self._fully_explored_by = tid
 
     # ------------------------------------------------------------------
     # Helpers
@@ -355,7 +450,6 @@ class Game:
             listen_frequency=state.listen_frequency,
             turn_number=self.turn,
             total_explorable_tiles=self._total_explorable,
-            team_explored_count=len(self._visited[state.team_id]),
         )
 
     @staticmethod
@@ -505,7 +599,8 @@ class Game:
                 for bid, st in self._bot_states.items()
             ],
             "scores": {
-                str(tid): len(self._visited[tid]) for tid in self._team_ids
+                str(tid): self._discovery_scores[tid]
+                for tid in self._team_ids
             },
             "visited": {
                 str(tid): [[x, y] for x, y in self._visited[tid]]
@@ -544,7 +639,7 @@ class Game:
                 "turn": self.turn,
                 "bots": bots,
                 "scores": {
-                    str(tid): len(self._visited[tid])
+                    str(tid): self._discovery_scores[tid]
                     for tid in self._team_ids
                 },
                 "new_visits": new_visits,
@@ -598,7 +693,8 @@ class Game:
         visited: dict[int, frozenset[tuple[int, int]]] = {}
         for tid in self._team_ids:
             visited[tid] = frozenset(self._visited[tid])
-            scores[tid] = len(self._visited[tid])
+            # Discovery score is the official score
+            scores[tid] = self._discovery_scores[tid]
 
         # Build ranking: descending by score, stable order for ties
         ranking = sorted(self._team_ids, key=lambda t: scores[t], reverse=True)

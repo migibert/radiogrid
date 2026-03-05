@@ -38,13 +38,18 @@ contributions/my_team/
 ```python
 # contributions/my_team/my_team.py
 from radiogrid.engine.bot_interface import Bot, Team
-from radiogrid.engine.models import Action, BotContext, BotOutput, Message
+from radiogrid.engine.models import Action, BotContext, BotOutput, Message, TileType
 from radiogrid.registry import TeamRegistry
 
 
 class MyBot(Bot):
+    def __init__(self):
+        super().__init__()
+        self._known: dict[tuple[int, int], TileType] = {}
+
     def decide(self, context: BotContext) -> BotOutput:
         # Your strategy here
+        # Record scan results into self._known to share with the team
         return BotOutput(action=Action.STAY)
 
 
@@ -57,15 +62,29 @@ class MyBot(Bot):
 class MyTeam(Team):
     def __init__(self) -> None:
         super().__init__(default_frequency=42)
+        self._bots: list[MyBot] = []
 
     def initialize(self) -> list[Bot]:
-        return [MyBot() for _ in range(5)]
+        self._bots = [MyBot() for _ in range(5)]
+        return self._bots
+
+    def get_discovered_tiles(self) -> dict[tuple[int, int], TileType]:
+        """Merge all bots' known maps into one report.
+
+        This is called by the engine every turn.  Each correct tile = +1,
+        each wrong tile = -1.  Only report tiles you're confident about.
+        """
+        merged: dict[tuple[int, int], TileType] = {}
+        for bot in self._bots:
+            merged.update(bot._known)
+        return merged
 ```
 
 ## Rules
 
 - Your bot receives a `BotContext` each turn — this is **read-only** partial information.
 - You must return a `BotOutput` with one action, 0–3 messages, and optional frequency changes.
+- **Scoring is based on discovery**: implement `get_discovered_tiles()` on your `Team` to report your map knowledge. Each correct tile = +1, each wrong tile = −1, score = `max(0, correct − wrong)`. Without this method your team scores **0**.
 - Do **not** access game engine internals, other bots' memory, or the full map.
 - Spoofing, eavesdropping, and deception via radio are fair game.
 - See the main `README.MD` for the full game specification.
