@@ -373,21 +373,21 @@ class CartographerBot(Bot):
     # ── frontier selection ───────────────────────────────────────
     def _pick_frontier_target(self, pos: tuple[int, int]) -> Optional[tuple[int, int]]:
         frontier: list[tuple[int, int]] = []
-        for (kx, ky), tile in self._known.items():
-            if tile in (TileType.OBSTACLE, TileType.OUT_OF_BOUNDS):
+        known = self._known
+        _OBS = TileType.OBSTACLE
+        _OOB = TileType.OUT_OF_BOUNDS
+        for (kx, ky), tile in known.items():
+            if tile is _OBS or tile is _OOB:
                 continue
             for _, (dx, dy) in _MOVES:
                 nb = (kx + dx, ky + dy)
-                if nb not in self._known:
+                if nb not in known:
                     frontier.append(nb)
 
         if not frontier:
-            # No unknown neighbours — target any known passable tile we
-            # haven't visited yet (including traps — they count toward
-            # exploration and must be stepped on).
             unvisited = [
-                p for p, t in self._known.items()
-                if t not in (TileType.OBSTACLE, TileType.OUT_OF_BOUNDS)
+                p for p, t in known.items()
+                if t is not _OBS and t is not _OOB
                 and p not in self._visited
             ]
             if unvisited:
@@ -395,24 +395,33 @@ class CartographerBot(Bot):
                 return unvisited[0]
             return None
 
+        # Deduplicate
         frontier = list(set(frontier))
 
         peers = [
             p for bid, p in self._peer_positions.items() if bid != self.id
         ]
 
+        # Sample if frontier is very large
+        if len(frontier) > 200:
+            self._rng.shuffle(frontier)
+            candidates = frontier[:200]
+        else:
+            candidates = frontier
+
         def score(tile: tuple[int, int]) -> float:
-            dist_to_me = _manhattan(pos, tile)
+            dist_to_me = abs(pos[0] - tile[0]) + abs(pos[1] - tile[1])
             if peers:
-                min_peer_dist = min(_manhattan(tile, p) for p in peers)
+                min_peer_dist = min(
+                    abs(tile[0] - p[0]) + abs(tile[1] - p[1]) for p in peers
+                )
             else:
                 min_peer_dist = 0
             return min_peer_dist * 2.0 - dist_to_me * 1.0
 
-        frontier.sort(key=score, reverse=True)
-        top_n = max(1, len(frontier) // 5)
-        candidates = frontier[:top_n]
-        return self._rng.choice(candidates)
+        candidates.sort(key=score, reverse=True)
+        top_n = max(1, len(candidates) // 5)
+        return self._rng.choice(candidates[:top_n])
 
     # ── BFS pathfinding ──────────────────────────────────────────
     def _bfs_path(
@@ -420,28 +429,37 @@ class CartographerBot(Bot):
     ) -> list[tuple[int, int]]:
         if start == goal:
             return []
-        queue: deque[tuple[tuple[int, int], list[tuple[int, int]]]] = deque()
-        queue.append((start, []))
+        known = self._known
+        _OBS = TileType.OBSTACLE
+        _OOB = TileType.OUT_OF_BOUNDS
+        queue: deque[tuple[tuple[int, int], int]] = deque()
+        queue.append((start, 0))
         visited: set[tuple[int, int]] = {start}
+        parent: dict[tuple[int, int], tuple[int, int]] = {}
 
         while queue:
-            cur, path = queue.popleft()
-            if len(path) >= max_depth:
+            cur, depth = queue.popleft()
+            if depth >= max_depth:
                 continue
             for _, (dx, dy) in _MOVES:
                 nb = (cur[0] + dx, cur[1] + dy)
                 if nb in visited:
                     continue
-                tile = self._known.get(nb)
-                if tile in (TileType.OBSTACLE, TileType.OUT_OF_BOUNDS):
+                tile = known.get(nb)
+                if tile is _OBS or tile is _OOB:
                     continue
-                # Allow pathing through traps (the freeze cost is worth
-                # reaching unexplored areas on the other side).
                 visited.add(nb)
-                new_path = path + [nb]
+                parent[nb] = cur
                 if nb == goal:
-                    return new_path
-                queue.append((nb, new_path))
+                    # Reconstruct path
+                    path: list[tuple[int, int]] = []
+                    node = nb
+                    while node != start:
+                        path.append(node)
+                        node = parent[node]
+                    path.reverse()
+                    return path
+                queue.append((nb, depth + 1))
         return []
 
     # ── stuck detection ──────────────────────────────────────────

@@ -147,15 +147,21 @@ class Game:
         # Count total explorable tiles (exclude obstacles AND traps).
         # Traps are passable but carry only a freeze penalty — no
         # exploration reward, so they don't count toward the goal.
-        self._total_explorable = sum(
-            1
-            for x in range(self.game_map.width)
-            for y in range(self.game_map.height)
-            if self.game_map.tiles[x][y] not in (TileType.OBSTACLE, TileType.TRAP)
-        )
+        _OBSTACLE = TileType.OBSTACLE
+        _TRAP = TileType.TRAP
+        _tiles = self.game_map.tiles
+        explorable = 0
+        for col in _tiles:
+            for t in col:
+                if t is not _OBSTACLE and t is not _TRAP:
+                    explorable += 1
+        self._total_explorable = explorable
 
         # Track which team (if any) first fully explores the map
         self._fully_explored_by: int | None = None
+
+        # Cached set of team ids for fast membership tests
+        self._team_id_set: frozenset[int] = frozenset(self._team_ids)
 
         # Per-team telemetry
         self._team_stats: dict[int, TeamStats] = {
@@ -197,9 +203,16 @@ class Game:
     # ------------------------------------------------------------------
 
     def _execute_turn(self) -> None:
+        bot_states = self._bot_states
+        team_stats = self._team_stats
+        game_map = self.game_map
+        direction_vectors = DIRECTION_VECTORS
+        visited = self._visited
+        team_ids = self._team_ids
+
         # Step 1 — Build contexts and collect decisions
         outputs: dict[int, BotOutput] = {}
-        for bid, state in self._bot_states.items():
+        for bid, state in bot_states.items():
             ctx = self._build_context(state)
             try:
                 out = state.bot.decide(ctx)
@@ -207,111 +220,110 @@ class Game:
                 out = BotOutput()
             outputs[bid] = self._validate_output(out)
 
-        # Step 2 — Movement (R1-R6)
+        # Steps 2-3 — Movement, move tracking, idle/scan stats, traps
+        # (consolidated into fewer loops for performance)
         moved_bots: set[int] = set()
         for bid, out in outputs.items():
-            state = self._bot_states[bid]
+            state = bot_states[bid]
             if state.frozen_turns_remaining > 0:
                 continue
-            if out.action in DIRECTION_VECTORS:
-                dx, dy = DIRECTION_VECTORS[out.action]
-                nx, ny = state.x + dx, state.y + dy
-                if self.game_map.is_passable(nx, ny):
+            action = out.action
+            dv = direction_vectors.get(action)
+            if dv is not None:
+                nx, ny = state.x + dv[0], state.y + dv[1]
+                if game_map.is_passable(nx, ny):
                     state.x = nx
                     state.y = ny
                     moved_bots.add(bid)
 
-        # Step 2b — Track move success for bot feedback
+        just_trapped: set[int] = set()
+        for tid in team_ids:
+            self._new_visits_this_turn[tid].clear()
+
+        # Single pass for: move success, stats, traps, exploration
         for bid, out in outputs.items():
-            state = self._bot_states[bid]
-            ts = self._team_stats[state.team_id]
-            if out.action in DIRECTION_VECTORS:
-                state.last_move_succeeded = bid in moved_bots
+            state = bot_states[bid]
+            ts = team_stats[state.team_id]
+            action = out.action
+            dv = direction_vectors.get(action)
+            if dv is not None:
+                succeeded = bid in moved_bots
+                state.last_move_succeeded = succeeded
                 ts.moves_attempted += 1
-                if bid not in moved_bots:
+                if not succeeded:
                     ts.moves_failed += 1
             else:
                 state.last_move_succeeded = True
 
-        # Step 2c — Track idle and scan stats
-        for bid, out in outputs.items():
-            state = self._bot_states[bid]
-            ts = self._team_stats[state.team_id]
-            if out.action == Action.SCAN:
+            if action == Action.SCAN:
                 ts.scans_performed += 1
-            elif out.action == Action.STAY and state.frozen_turns_remaining == 0:
+            elif action == Action.STAY and state.frozen_turns_remaining == 0:
                 ts.idle_turns += 1
 
-        # Step 3 — Trap effects (R5): only for bots that actually moved
-        just_trapped: set[int] = set()
+        # Trap effects for moved bots + exploration update for all
+        tiles_grid = game_map.tiles
+        map_w = game_map.width
+        map_h = game_map.height
         for bid in moved_bots:
-            state = self._bot_states[bid]
-            if self.game_map.get_tile(state.x, state.y) == TileType.TRAP:
+            state = bot_states[bid]
+            if tiles_grid[state.x][state.y] is TileType.TRAP:
                 state.frozen_turns_remaining = 3
                 just_trapped.add(bid)
-                self._team_stats[state.team_id].traps_triggered += 1
+                team_stats[state.team_id].traps_triggered += 1
 
         # Step 4 — Update exploration scores (R20-R22)
-        # Traps are passable but do NOT count as explored (penalty only).
-        for tid in self._team_ids:
-            self._new_visits_this_turn[tid].clear()
-        for state in self._bot_states.values():
-            tile = self.game_map.get_tile(state.x, state.y)
-            if tile not in (TileType.OBSTACLE, TileType.TRAP):
+        for state in bot_states.values():
+            tile = tiles_grid[state.x][state.y]
+            if tile is not TileType.OBSTACLE and tile is not TileType.TRAP:
                 pos = (state.x, state.y)
-                if pos not in self._visited[state.team_id]:
-                    self._visited[state.team_id].add(pos)
+                team_visited = visited[state.team_id]
+                if pos not in team_visited:
+                    team_visited.add(pos)
                     self._new_visits_this_turn[state.team_id].append(pos)
 
         # Check for full map exploration
         if self._fully_explored_by is None:
-            for tid in self._team_ids:
-                if len(self._visited[tid]) >= self._total_explorable:
+            total = self._total_explorable
+            for tid in team_ids:
+                if len(visited[tid]) >= total:
                     self._fully_explored_by = tid
-                    break  # first team checked wins ties within a turn
+                    break
 
         # Build position index for efficient scan lookups
         pos_index: dict[tuple[int, int], list[_BotState]] = {}
-        for s in self._bot_states.values():
-            pos_index.setdefault((s.x, s.y), []).append(s)
+        for s in bot_states.values():
+            key = (s.x, s.y)
+            bucket = pos_index.get(key)
+            if bucket is None:
+                pos_index[key] = [s]
+            else:
+                bucket.append(s)
 
-        # Step 5 — Scan results (built now, delivered next turn via context)
+        # Step 5 — Scan results + Step 7 — Frequency changes
+        # (combined into one loop)
         for bid, out in outputs.items():
-            state = self._bot_states[bid]
+            state = bot_states[bid]
             if out.action == Action.SCAN:
-                # R10: frozen bots CAN scan
-                if state.frozen_turns_remaining > 0 and bid not in just_trapped:
-                    # Frozen from a previous turn — still allowed to scan per R10
-                    pass
                 state.scan_result = self._build_scan_result(state.x, state.y, pos_index)
+            if out.new_broadcast_frequency is not None:
+                state.broadcast_frequency = out.new_broadcast_frequency
+                team_stats[state.team_id].frequency_changes += 1
+            if out.new_listen_frequency is not None:
+                state.listen_frequency = out.new_listen_frequency
+                team_stats[state.team_id].frequency_changes += 1
 
         # Step 6 — Communication (R13-R19)
         self._dispatch_messages(outputs)
 
-        # Step 7 — Frequency changes (take effect for next turn)
-        for bid, out in outputs.items():
-            state = self._bot_states[bid]
-            ts = self._team_stats[state.team_id]
-            if out.new_broadcast_frequency is not None:
-                state.broadcast_frequency = out.new_broadcast_frequency
-                ts.frequency_changes += 1
-            if out.new_listen_frequency is not None:
-                state.listen_frequency = out.new_listen_frequency
-                ts.frequency_changes += 1
-
         # Step 8 — Decrement freeze timers (skip just-trapped bots)
-        for bid, state in self._bot_states.items():
-            if bid in just_trapped:
-                continue
-            if state.frozen_turns_remaining > 0:
+        for bid, state in bot_states.items():
+            if bid not in just_trapped and state.frozen_turns_remaining > 0:
                 state.frozen_turns_remaining -= 1
-                self._team_stats[state.team_id].turns_frozen += 1
+                team_stats[state.team_id].turns_frozen += 1
 
         # Step 9 — Record exploration curve
-        for tid in self._team_ids:
-            self._team_stats[tid].exploration_curve.append(
-                len(self._visited[tid])
-            )
+        for tid in team_ids:
+            team_stats[tid].exploration_curve.append(len(visited[tid]))
 
         # Step 10 — Record snapshot for history replay
         self._record_snapshot(outputs)
@@ -375,16 +387,21 @@ class Game:
     ) -> ScanResult:
         """Build scan result for the 8 tiles surrounding (cx, cy)."""
         tiles: dict[tuple[int, int], TileInfo] = {}
+        game_map = self.game_map
+        gm_w = game_map.width
+        gm_h = game_map.height
+        gm_tiles = game_map.tiles
+        _OOB = TileType.OUT_OF_BOUNDS
         for dx in (-1, 0, 1):
             for dy in (-1, 0, 1):
                 if dx == 0 and dy == 0:
                     continue
                 nx, ny = cx + dx, cy + dy
-                tile_type = self.game_map.get_tile(nx, ny)
-                bots_here: list[BotInfo] = []
-                if tile_type != TileType.OUT_OF_BOUNDS:
-                    for s in pos_index.get((nx, ny), ()):
-                        bots_here.append(
+                if 0 <= nx < gm_w and 0 <= ny < gm_h:
+                    tile_type = gm_tiles[nx][ny]
+                    bots_at = pos_index.get((nx, ny))
+                    if bots_at:
+                        bots_here = [
                             BotInfo(
                                 id=s.bot.id,
                                 team_id=s.team_id,
@@ -392,7 +409,13 @@ class Game:
                                 listen_frequency=s.listen_frequency,
                                 frozen_turns_remaining=s.frozen_turns_remaining,
                             )
-                        )
+                            for s in bots_at
+                        ]
+                    else:
+                        bots_here = []
+                else:
+                    tile_type = _OOB
+                    bots_here = []
                 tiles[(dx, dy)] = TileInfo(tile_type=tile_type, bots=bots_here)
         return ScanResult(tiles=tiles)
 
@@ -406,55 +429,63 @@ class Game:
 
         Also records per-team message telemetry in ``_team_stats``.
         """
+        bot_states = self._bot_states
+        team_stats = self._team_stats
+
         # Clear all inboxes
-        for state in self._bot_states.values():
+        for state in bot_states.values():
             state.inbox = []
 
         # Collect messages together with the *real* team id of the sender
         outgoing: list[tuple[int, Message]] = []  # (real_team_id, msg)
-        all_team_ids = set(self._team_ids)
+        all_team_ids = self._team_id_set
         for bid, out in outputs.items():
-            real_tid = self._bot_states[bid].team_id
-            for msg in out.messages:
+            msgs = out.messages
+            if not msgs:
+                continue
+            real_tid = bot_states[bid].team_id
+            ts = team_stats[real_tid]
+            for msg in msgs:
                 outgoing.append((real_tid, msg))
-                self._team_stats[real_tid].messages_sent += 1
-                # Spoof detection: the declared sender_team_id is a
-                # *different* valid team id — i.e. the bot is actively
-                # impersonating another team.  Leaving sender_team_id at
-                # None (or the bot's own team) does NOT count.
+                ts.messages_sent += 1
                 if (msg.sender_team_id is not None
                         and msg.sender_team_id != real_tid
                         and msg.sender_team_id in all_team_ids):
-                    self._team_stats[real_tid].spoofed_messages_sent += 1
+                    ts.spoofed_messages_sent += 1
+
+        if not outgoing:
+            return
 
         # Build frequency → listeners index for efficient delivery
         freq_index: dict[int, list[_BotState]] = {}
-        for state in self._bot_states.values():
-            freq_index.setdefault(state.listen_frequency, []).append(state)
+        for state in bot_states.values():
+            freq = state.listen_frequency
+            bucket = freq_index.get(freq)
+            if bucket is None:
+                freq_index[freq] = [state]
+            else:
+                bucket.append(state)
 
         # Deliver to matching inboxes and track receive stats.
-        # Receive counts are per *unique message* reaching a team, not
-        # per bot‑inbox insertion (a single message heard by 5 bots on
-        # the same team still counts as 1 received message for that team).
         for real_tid, msg in outgoing:
+            listeners = freq_index.get(msg.frequency)
+            if not listeners:
+                continue
             is_spoofed = (msg.sender_team_id is not None
                           and msg.sender_team_id != real_tid
                           and msg.sender_team_id in all_team_ids)
             teams_reached: set[int] = set()
-            for state in freq_index.get(msg.frequency, ()):
+            for state in listeners:
                 state.inbox.append(msg)
                 teams_reached.add(state.team_id)
-            # Update per-team stats once per team per message
             for recv_tid in teams_reached:
-                recv_ts = self._team_stats[recv_tid]
+                recv_ts = team_stats[recv_tid]
                 if recv_tid == real_tid:
                     recv_ts.messages_received_own += 1
                 else:
                     recv_ts.messages_received_cross += 1
-                # A spoofed message that lands in an opponent team's
-                # inbox counts as a delivered spoof for the *sender*.
                 if is_spoofed and recv_tid != real_tid:
-                    self._team_stats[real_tid].spoofed_messages_delivered += 1
+                    team_stats[real_tid].spoofed_messages_delivered += 1
 
     # ------------------------------------------------------------------
     # History recording

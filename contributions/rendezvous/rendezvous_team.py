@@ -37,7 +37,7 @@ from radiogrid.registry import TeamRegistry
 TEAM_SIZE = 5
 _BOOTSTRAP_TIMEOUT = 6  # abandon bootstrap after this turn number
 _TRAP_STEP_COST = 5  # Dijkstra cost to traverse a known trap tile
-_MAX_PATH_COST = 120
+_MAX_PATH_COST = 50
 
 # Cardinal directions assigned to bot indices 0-3; bot 4 gets shortest axis.
 _BORDER_DIRS: list[tuple[int, int]] = [
@@ -585,8 +585,9 @@ class RendezvousBot(Bot):
         if self._zone_id >= 0:
             parts.append(f"{pfx}Z{self.id}:{self._zone_id}")
         if self._known_traps:
+            _traps_iter = self._known_traps if len(self._known_traps) <= 20 else list(self._known_traps)[:20]
             trap_body = f"{pfx}T" + "|".join(
-                f"{x},{y}" for x, y in sorted(self._known_traps)
+                f"{x},{y}" for x, y in _traps_iter
             )
             candidate = ";".join(parts) + ";" + trap_body
             if len(_TOKEN + candidate) <= 256:
@@ -684,21 +685,23 @@ class RendezvousBot(Bot):
         """
         frontier: list[tuple[int, int]] = []
         seen: set[tuple[int, int]] = set()
-        for (kx, ky), tile in self._known.items():
-            if tile in (TileType.OBSTACLE, TileType.OUT_OF_BOUNDS):
+        known = self._known
+        _OBS = TileType.OBSTACLE
+        _OOB = TileType.OUT_OF_BOUNDS
+        for (kx, ky), tile in known.items():
+            if tile is _OBS or tile is _OOB:
                 continue
             for _, (dx, dy) in _MOVES:
                 nb = (kx + dx, ky + dy)
-                if nb not in seen and nb not in self._known:
+                if nb not in seen and nb not in known:
                     seen.add(nb)
                     frontier.append(nb)
 
         if not frontier:
-            # No unknown neighbours — visit any known passable unvisited tile
             unvisited = [
                 p
-                for p, t in self._known.items()
-                if t not in (TileType.OBSTACLE, TileType.OUT_OF_BOUNDS)
+                for p, t in known.items()
+                if t is not _OBS and t is not _OOB
                 and p not in self._visited
             ]
             return self._rng.choice(unvisited) if unvisited else None
@@ -707,30 +710,41 @@ class RendezvousBot(Bot):
             p for bid, p in self._peer_positions.items() if bid != self.id
         ]
 
-        # Direction bias: before absolute localisation, strongly prefer
-        # frontiers that lie in the assigned border direction.
         bd = self._border_dir if not self._abs_localized else None
 
-        def score(tile: tuple[int, int]) -> float:
-            dist = _manhattan(pos, tile)
-            min_peer = min(
-                (_manhattan(tile, p) for p in peers), default=0
-            )
-            s = min_peer * 2.0 - dist * 1.0
-            if bd is not None:
-                # dot product of (tile - pos) with border direction
-                dx = tile[0] - pos[0]
-                dy = tile[1] - pos[1]
-                dot = dx * bd[0] + dy * bd[1]
-                s += dot * 3.0  # strong directional pull
-            # Zone bonus when localised
-            if self._zone_computed and self._zone_x_min <= tile[0] <= self._zone_x_max:
-                s += 5.0
-            return s
+        # Sample if frontier is very large
+        if len(frontier) > 100:
+            self._rng.shuffle(frontier)
+            candidates = frontier[:100]
+        else:
+            candidates = frontier
 
-        frontier.sort(key=score, reverse=True)
-        top_n = max(1, len(frontier) // 5)
-        return self._rng.choice(frontier[:top_n])
+        # Inline scoring for speed — avoid closure + min(genexpr) overhead
+        px, py = pos
+        peer_coords = [(p[0], p[1]) for p in peers]
+        zone_active = self._zone_computed
+        zmin = self._zone_x_min
+        zmax = self._zone_x_max
+        scored: list[tuple[float, tuple[int, int]]] = []
+        for tile in candidates:
+            tx, ty = tile
+            dist = abs(px - tx) + abs(py - ty)
+            mp = 999_999
+            for ppx, ppy in peer_coords:
+                pd = abs(tx - ppx) + abs(ty - ppy)
+                if pd < mp:
+                    mp = pd
+            if mp == 999_999:
+                mp = 0
+            s = mp * 2.0 - dist
+            if bd is not None:
+                s += (tx - px) * bd[0] * 3.0 + (ty - py) * bd[1] * 3.0
+            if zone_active and zmin <= tx <= zmax:
+                s += 5.0
+            scored.append((s, tile))
+        scored.sort(reverse=True, key=lambda x: x[0])
+        top_n = max(1, len(scored) // 5)
+        return self._rng.choice(scored[:top_n])[1]
 
     # ── Dijkstra pathfinding (trap-aware) ────────────────────────
 
@@ -739,42 +753,53 @@ class RendezvousBot(Bot):
         start: tuple[int, int],
         goal: tuple[int, int],
     ) -> list[tuple[int, int]]:
-        """Shortest path that penalises known trap tiles."""
+        """A* shortest path that penalises known trap tiles."""
         if start == goal:
             return []
-        heap: list[tuple[int, int, int]] = [(0, start[0], start[1])]
+        known = self._known
+        known_traps = self._known_traps
+        _OBS = TileType.OBSTACLE
+        _OOB = TileType.OUT_OF_BOUNDS
+        _TRAP = TileType.TRAP
+        max_cost = _MAX_PATH_COST
+        gx, gy = goal
+        h0 = abs(start[0] - gx) + abs(start[1] - gy)
+        # A* heap: (f=g+h, g, x, y)
+        heap: list[tuple[int, int, int, int]] = [(h0, 0, start[0], start[1])]
         costs: dict[tuple[int, int], int] = {start: 0}
         parent: dict[tuple[int, int], tuple[int, int]] = {}
+        expansions = 0
 
         while heap:
-            cost, cx, cy = heappop(heap)
-            cur = (cx, cy)
-            if cur == goal:
+            _f, g, cx, cy = heappop(heap)
+            if cx == gx and cy == gy:
                 path: list[tuple[int, int]] = []
+                cur = goal
                 while cur != start:
                     path.append(cur)
                     cur = parent[cur]
                 path.reverse()
                 return path
-            if cost > costs.get(cur, 999_999):
+            cur = (cx, cy)
+            if g > costs.get(cur, 999_999):
                 continue
-            if cost >= _MAX_PATH_COST:
+            if g >= max_cost:
                 continue
+            expansions += 1
+            if expansions > 1000:
+                break
             for _, (dx, dy) in _MOVES:
-                nb = (cx + dx, cy + dy)
-                tile = self._known.get(nb)
-                if tile in (TileType.OBSTACLE, TileType.OUT_OF_BOUNDS):
+                nx, ny = cx + dx, cy + dy
+                nb = (nx, ny)
+                tile = known.get(nb)
+                if tile is _OBS or tile is _OOB:
                     continue
-                step = (
-                    _TRAP_STEP_COST
-                    if (tile == TileType.TRAP or nb in self._known_traps)
-                    else 1
-                )
-                nc = cost + step
+                step = _TRAP_STEP_COST if (tile is _TRAP or nb in known_traps) else 1
+                nc = g + step
                 if nc < costs.get(nb, 999_999):
                     costs[nb] = nc
                     parent[nb] = cur
-                    heappush(heap, (nc, nb[0], nb[1]))
+                    heappush(heap, (nc + abs(nx - gx) + abs(ny - gy), nc, nx, ny))
         return []
 
     # ── Zone computation ─────────────────────────────────────────

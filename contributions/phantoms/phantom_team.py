@@ -70,7 +70,7 @@ _TOKEN = "#PHT#"                  # authentication prefix for team messages
 _FREQ_STALE_AFTER = 30            # turns before a discovered freq is stale
 _PROBE_RANGE = range(1, 101)      # random freq range for blind probing
 _TRAP_STEP_COST = 5
-_MAX_PATH_COST = 120
+_MAX_PATH_COST = 50
 _MAX_TEMPLATES = 20               # max stored intercepted messages per freq
 _COORD_RE = re.compile(r'\d+,\d+')  # matches coordinate pairs in messages
 
@@ -177,13 +177,7 @@ class PhantomBot(Bot):
         self._intercepted_templates: dict[int, list[str]] = {}
         # Maps enemy frequency → team_id, learned from scan BotInfo.
         self._freq_team_id: dict[int, int] = {}
-        # The listen frequency that was active during the LAST turn's
-        # message dispatch.  Because the engine dispatches messages
-        # before applying frequency changes, ctx.listen_frequency
-        # reflects the NEW frequency, while the inbox was filled
-        # using the OLD one.  We track the old value here so we
-        # know what the inbox actually contains.
-        self._dispatch_freq: int = TEAM_FREQ
+
 
     # ── Coordinate helpers ───────────────────────────────────────
 
@@ -230,17 +224,15 @@ class PhantomBot(Bot):
                 self._known_traps.add(pos)
 
         # ── Inbox processing ────────────────────────────────────
-        # The inbox was filled during the PREVIOUS turn's dispatch,
-        # which matched self._dispatch_freq (not ctx.listen_frequency,
-        # because frequency changes apply after dispatch).
-        inbox_freq = self._dispatch_freq
+        # The engine applies frequency changes BEFORE dispatching
+        # messages, so ctx.listen_frequency correctly reflects which
+        # frequency the current inbox was filled on.
+        inbox_freq = ctx.listen_frequency
         if self._is_spy and inbox_freq != TEAM_FREQ:
             # Inbox contains enemy messages from eavesdropping
             self._process_intercepted(ctx, inbox_freq)
         # Always process any own-team messages in inbox
         self._process_team_inbox(ctx)
-        # Record current freq for next turn's inbox routing
-        self._dispatch_freq = ctx.listen_frequency
 
         # ── Zone ─────────────────────────────────────────────────
         if self._loc and not self._zone_computed:
@@ -542,10 +534,21 @@ class PhantomBot(Bot):
         so the forged data looks realistic.  Falls back to random
         in-bounds coordinates when map knowledge is sparse.
         """
-        candidates = [
-            p for p, t in self._known.items()
-            if t in (TileType.EMPTY, TileType.SPAWN) and p != self._pos
-        ]
+        _EMPTY = TileType.EMPTY
+        _SPAWN = TileType.SPAWN
+        pos = self._pos
+        candidates: list[tuple[int, int]] = []
+        # Sample from known tiles instead of iterating all
+        known_items = list(self._known.items())
+        if len(known_items) > 200:
+            sample = self._rng.sample(known_items, 200)
+        else:
+            sample = known_items
+        for p, t in sample:
+            if (t is _EMPTY or t is _SPAWN) and p != pos:
+                candidates.append(p)
+                if len(candidates) >= 60:
+                    break
         # Pad with random coords if we don't have enough known tiles
         if self._map_w > 0 and self._map_h > 0:
             while len(candidates) < 40:
@@ -642,8 +645,9 @@ class PhantomBot(Bot):
             )
 
         if self._known_traps:
+            _traps_iter = self._known_traps if len(self._known_traps) <= 20 else list(self._known_traps)[:20]
             trap_body = "AT" + "|".join(
-                f"{x},{y}" for x, y in sorted(self._known_traps)
+                f"{x},{y}" for x, y in _traps_iter
             )
             candidate = _TOKEN + ";".join(parts) + ";" + trap_body
             if len(candidate) <= 256:
@@ -900,20 +904,22 @@ class PhantomBot(Bot):
         """
         frontier: list[tuple[int, int]] = []
         seen: set[tuple[int, int]] = set()
-        for (kx, ky), tile in self._known.items():
-            if tile in (TileType.OBSTACLE, TileType.OUT_OF_BOUNDS):
+        known = self._known
+        _OBS = TileType.OBSTACLE
+        _OOB = TileType.OUT_OF_BOUNDS
+        for (kx, ky), tile in known.items():
+            if tile is _OBS or tile is _OOB:
                 continue
             for _, (dx, dy) in _MOVES:
                 nb = (kx + dx, ky + dy)
-                if nb in seen or nb in self._known:
-                    continue
-                seen.add(nb)
-                frontier.append(nb)
+                if nb not in seen and nb not in known:
+                    seen.add(nb)
+                    frontier.append(nb)
 
         if not frontier:
             unvisited = [
-                p for p, t in self._known.items()
-                if t not in (TileType.OBSTACLE, TileType.OUT_OF_BOUNDS)
+                p for p, t in known.items()
+                if t is not _OBS and t is not _OOB
                 and p not in self._visited
             ]
             if unvisited:
@@ -927,27 +933,45 @@ class PhantomBot(Bot):
         ]
         enemy_locs = list(self._enemy_positions.values())
 
-        def score(tile: tuple[int, int]) -> float:
-            dist = _manhattan(pos, tile)
-            min_peer = min(
-                (_manhattan(tile, p) for p in peers), default=0
-            )
-            s = min_peer * 2.0 - dist * 1.0
+        # Score only a random sample if frontier is large
+        if len(frontier) > 100:
+            self._rng.shuffle(frontier)
+            candidates = frontier[:100]
+        else:
+            candidates = frontier
 
-            # Mild preference for areas enemies aren't covering
-            if enemy_locs:
-                min_enemy = min(_manhattan(tile, e) for e in enemy_locs)
-                s += min_enemy * 0.5
-
-            # Zone bonus
-            if (self._zone_computed
-                    and self._zone_x_min <= tile[0] <= self._zone_x_max):
+        # Inline scoring for speed
+        px, py = pos
+        peer_coords = [(p[0], p[1]) for p in peers]
+        enemy_coords = [(e[0], e[1]) for e in enemy_locs]
+        zone_active = self._zone_computed
+        zmin = self._zone_x_min
+        zmax = self._zone_x_max
+        scored: list[tuple[float, tuple[int, int]]] = []
+        for tile in candidates:
+            tx, ty = tile
+            dist = abs(px - tx) + abs(py - ty)
+            mp = 999_999
+            for ppx, ppy in peer_coords:
+                pd = abs(tx - ppx) + abs(ty - ppy)
+                if pd < mp:
+                    mp = pd
+            if mp == 999_999:
+                mp = 0
+            s = mp * 2.0 - dist
+            if enemy_coords:
+                me = 999_999
+                for ex, ey in enemy_coords:
+                    ed = abs(tx - ex) + abs(ty - ey)
+                    if ed < me:
+                        me = ed
+                s += me * 0.5
+            if zone_active and zmin <= tx <= zmax:
                 s += 5.0
-            return s
-
-        frontier.sort(key=score, reverse=True)
-        top_n = max(1, len(frontier) // 5)
-        return self._rng.choice(frontier[:top_n])
+            scored.append((s, tile))
+        scored.sort(reverse=True, key=lambda x: x[0])
+        top_n = max(1, len(scored) // 5)
+        return self._rng.choice(scored[:top_n])[1]
 
     # ── Dijkstra (trap-aware) ────────────────────────────────────
 
@@ -956,42 +980,53 @@ class PhantomBot(Bot):
         start: tuple[int, int],
         goal: tuple[int, int],
     ) -> list[tuple[int, int]]:
-        """Shortest path that penalises known trap tiles."""
+        """A* shortest path that penalises known trap tiles."""
         if start == goal:
             return []
-        heap: list[tuple[int, int, int]] = [(0, start[0], start[1])]
+        known = self._known
+        known_traps = self._known_traps
+        _OBS = TileType.OBSTACLE
+        _OOB = TileType.OUT_OF_BOUNDS
+        _TRAP = TileType.TRAP
+        max_cost = _MAX_PATH_COST
+        gx, gy = goal
+        h0 = abs(start[0] - gx) + abs(start[1] - gy)
+        # A* heap: (f=g+h, g, x, y)
+        heap: list[tuple[int, int, int, int]] = [(h0, 0, start[0], start[1])]
         costs: dict[tuple[int, int], int] = {start: 0}
         parent: dict[tuple[int, int], tuple[int, int]] = {}
+        expansions = 0
 
         while heap:
-            cost, cx, cy = heappop(heap)
-            cur = (cx, cy)
-            if cur == goal:
+            _f, g, cx, cy = heappop(heap)
+            if cx == gx and cy == gy:
                 path: list[tuple[int, int]] = []
+                cur = goal
                 while cur != start:
                     path.append(cur)
                     cur = parent[cur]
                 path.reverse()
                 return path
-            if cost > costs.get(cur, 999_999):
+            cur = (cx, cy)
+            if g > costs.get(cur, 999_999):
                 continue
-            if cost >= _MAX_PATH_COST:
+            if g >= max_cost:
                 continue
+            expansions += 1
+            if expansions > 1000:
+                break
             for _, (dx, dy) in _MOVES:
-                nb = (cx + dx, cy + dy)
-                tile = self._known.get(nb)
-                if tile in (TileType.OBSTACLE, TileType.OUT_OF_BOUNDS):
+                nx, ny = cx + dx, cy + dy
+                nb = (nx, ny)
+                tile = known.get(nb)
+                if tile is _OBS or tile is _OOB:
                     continue
-                step = (
-                    _TRAP_STEP_COST
-                    if (tile == TileType.TRAP or nb in self._known_traps)
-                    else 1
-                )
-                nc = cost + step
+                step = _TRAP_STEP_COST if (tile is _TRAP or nb in known_traps) else 1
+                nc = g + step
                 if nc < costs.get(nb, 999_999):
                     costs[nb] = nc
                     parent[nb] = cur
-                    heappush(heap, (nc, nb[0], nb[1]))
+                    heappush(heap, (nc + abs(nx - gx) + abs(ny - gy), nc, nx, ny))
         return []
 
     # ── Stuck detection ──────────────────────────────────────────
