@@ -7,8 +7,8 @@ describing its strategy and core algorithms.
 
 | Team | Directory | Key Idea |
 |---|---|---|
-| **Cartographers** | [`cartographers/`](cartographers/) | Frontier exploration with shared absolute map via radio |
 | **Pathfinders** | [`smart/`](smart/) | Dijkstra pathfinding around traps + zone-based territory coordination |
+| **Phantom Signals** | [`phantoms/`](phantoms/) | Communication intelligence — eavesdrop enemies, steal map data, broadcast disinformation |
 | **Rendezvous** | [`rendezvous/`](rendezvous/) | Bootstrap shared frame via teammate detection, then border-seeking + zones |
 
 See each team's `README.md` for detailed strategy, radio protocol, and

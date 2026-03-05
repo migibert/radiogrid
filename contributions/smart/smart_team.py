@@ -1,7 +1,9 @@
-"""Pathfinders Team — builds on Cartographers with trap avoidance & zones.
+"""Pathfinders Team — efficient cooperative exploration.
 
-This bot reuses the CartographerBot's proven explore-from-turn-1 pattern
-(no wasted "localisation phase") and layers on three improvements:
+Strategy overview
+-----------------
+**Core idea:** explore the map efficiently by avoiding hazards and
+partitioning the territory among teammates.
 
 1. **Enhanced localisation** — diagonal ``OUT_OF_BOUNDS`` inference lets a
    bot resolve both axes in fewer scans.
@@ -64,7 +66,7 @@ def _action_for_step(src: tuple[int, int], dst: tuple[int, int]) -> Action:
 # ── SmartBot ─────────────────────────────────────────────────────────
 
 class SmartBot(Bot):
-    """Cartographer-style explorer + trap avoidance + zone coordination."""
+    """Frontier explorer with trap avoidance + zone coordination."""
 
     def __init__(self, bot_index: int, rng_seed: int | None = None) -> None:
         super().__init__()
@@ -564,7 +566,7 @@ class SmartBot(Bot):
     key="pathfinders",
     name="Pathfinders",
     description=(
-        "Cartographer-style frontier exploration enhanced with trap sharing, "
+        "Frontier exploration enhanced with trap sharing, "
         "Dijkstra pathfinding around hazards, and zone-based territory coordination."
     ),
     author="Copilot",

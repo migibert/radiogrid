@@ -33,7 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="TYPE",
         help=(
             "Add a team of this type. Can be specified multiple times. "
-            "At least 2 teams required. Default: cartographers vs phantoms."
+            "At least 2 teams required. Default: pathfinders vs phantoms."
         ),
     )
     parser.add_argument("--width", type=int, default=20, help="Map width (default: 20)")
@@ -57,7 +57,7 @@ def main(argv: list[str] | None = None) -> None:
     TeamRegistry.discover()
     available = TeamRegistry.keys()
 
-    team_names = args.teams or ["cartographers", "phantoms"]
+    team_names = args.teams or ["pathfinders", "phantoms"]
 
     if len(team_names) < 2:
         parser.error("At least 2 teams are required (use --team multiple times)")

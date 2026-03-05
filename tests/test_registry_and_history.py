@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import pytest
 
 from radiogrid.engine.bot_interface import Bot, Team
@@ -54,7 +56,13 @@ class TestTeamRegistry:
         assert isinstance(team, _T)
 
     def test_discover_finds_contribution_teams(self):
+        import importlib
+
         TeamRegistry.clear()
+        # Evict cached modules so discover() re-executes the decorators.
+        for mod_name in list(sys.modules):
+            if mod_name.startswith("contributions."):
+                del sys.modules[mod_name]
         TeamRegistry.discover()
         keys = TeamRegistry.keys()
         assert len(keys) >= 1
@@ -67,8 +75,8 @@ class TestTeamRegistry:
     def test_keys(self):
         import importlib
 
-        import contributions.cartographers.cartographer_team as _ct
-        importlib.reload(_ct)
+        import contributions.smart.smart_team as _st
+        importlib.reload(_st)
 
         TeamRegistry.discover()
         keys = TeamRegistry.keys()

@@ -550,11 +550,11 @@ python run_ui.py --no-browser         # don't auto-open the browser
 ### Run from the CLI
 
 ```bash
-# Default: Cartographers vs Phantoms, 20×20 map, 200 turns
+# Default: Pathfinders vs Phantoms, 20×20 map, 200 turns
 python run_game.py
 
 # Custom game
-python run_game.py --team cartographers --team phantoms --team rendezvous \
+python run_game.py --team pathfinders --team phantoms --team rendezvous \
     --width 30 --height 30 --turns 300 --seed 42
 ```
 

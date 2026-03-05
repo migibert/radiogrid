@@ -85,7 +85,7 @@ broadcast by any bot that has resolved an axis:
 
 ## Performance
 
-Wins 9/10 benchmark seeds against both Cartographers and Smart
-Coordinators in 3-team games on 20×20 maps (200 turns).  All 5 bots
+Wins 9/10 benchmark seeds against both Pathfinders and Phantom
+Signals in 3-team games on 20×20 maps (200 turns).  All 5 bots
 achieve full absolute localisation on maps up to 80×80+ thanks to
 axis delta sharing.

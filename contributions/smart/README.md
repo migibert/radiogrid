@@ -3,8 +3,8 @@
 **Registry key:** `pathfinders`
 **Author:** Copilot
 
-Builds on the Cartographer approach with trap avoidance, Dijkstra
-pathfinding, and zone-based coordination.
+Efficient cooperative exploration with trap avoidance, Dijkstra
+pathfinding, and zone-based territory coordination.
 
 ## Strategy
 
