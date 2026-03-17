@@ -294,6 +294,11 @@ class Game:
                     team_visited.add(pos)
                     self._new_visits_this_turn[state.team_id].append(pos)
 
+        # Step 7 — Discovery scoring (spec 6.3 step 7)
+        # Each team reports its believed map; the engine validates
+        # silently and computes the discovery score.
+        self._evaluate_discoveries(team_ids, team_stats, visited)
+
         # Build position index for efficient scan lookups
         pos_index: dict[tuple[int, int], list[_BotState]] = {}
         for s in bot_states.values():
@@ -304,12 +309,18 @@ class Game:
             else:
                 bucket.append(s)
 
-        # Step 5 — Scan results + Step 7 — Frequency changes
-        # (combined into one loop)
+        # Step 8 — Scan results (spec 6.3 step 8)
         for bid, out in outputs.items():
             state = bot_states[bid]
             if out.action == Action.SCAN:
                 state.scan_result = self._build_scan_result(state.x, state.y, pos_index)
+
+        # Step 9 — Communication (spec 6.3 step 9, R13-R18)
+        self._dispatch_messages(outputs)
+
+        # Step 10 — Frequency changes (spec 6.3 step 10, R19)
+        for bid, out in outputs.items():
+            state = bot_states[bid]
             if out.new_broadcast_frequency is not None:
                 state.broadcast_frequency = out.new_broadcast_frequency
                 team_stats[state.team_id].frequency_changes += 1
@@ -317,15 +328,7 @@ class Game:
                 state.listen_frequency = out.new_listen_frequency
                 team_stats[state.team_id].frequency_changes += 1
 
-        # Step 6 — Communication (R13-R19)
-        self._dispatch_messages(outputs)
-
-        # Step 7 — Discovery scoring
-        # Each team reports its believed map; the engine validates
-        # silently and computes the discovery score.
-        self._evaluate_discoveries(team_ids, team_stats, visited)
-
-        # Step 8 — Decrement freeze timers (skip just-trapped bots)
+        # Step 11 — Decrement freeze timers (skip just-trapped bots)
         for bid, state in bot_states.items():
             if bid not in just_trapped and state.frozen_turns_remaining > 0:
                 state.frozen_turns_remaining -= 1

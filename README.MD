@@ -84,13 +84,16 @@ At the start of each turn, before deciding an action, each bot receives a read-o
 
 | Field | Description |
 |---|---|
-| `position` | Own current `(x, y)`. |
 | `frozen_turns_remaining` | How many turns the bot remains frozen (`0` = not frozen). |
+| `move_succeeded` | Whether the bot's last movement action succeeded (`true` on first turn and after non-move actions). |
+| `map_width` | Width of the map in tiles. |
+| `map_height` | Height of the map in tiles. |
 | `inbox` | List of `Message` objects received this turn (see Section 5). |
 | `scan_result` | `ScanResult` object if the bot scanned last turn, else `null`. |
 | `broadcast_frequency` | Current broadcast frequency. |
 | `listen_frequency` | Current listen frequency. |
 | `turn_number` | Current turn (1-indexed). |
+| `total_explorable_tiles` | Number of non-obstacle, non-trap tiles on the map. |
 
 ### 3.3 Bot Output (per turn)
 
@@ -117,7 +120,7 @@ At the start of each turn, before deciding an action, each bot receives a read-o
 ### 3.5 Frozen State
 
 - A bot that steps onto a Trap tile becomes frozen for **3 turns**.
-- **A frozen bot's action is always treated as `STAY`**, regardless of what it returns.
+- **A frozen bot cannot move** — its movement action is treated as `STAY`. However, a frozen bot **CAN** still scan (R10), and scan results are delivered normally the following turn.
 - A frozen bot **CAN** still send and receive messages normally.
 - A frozen bot **CAN** still change its broadcast and listen frequencies.
 - `frozen_turns_remaining` decrements by 1 at the end of each turn. At 0, the bot is free.
@@ -158,7 +161,7 @@ Each `TileInfo` contains:
 | Field | Type / Values |
 |---|---|
 | `tile_type` | `EMPTY`, `OBSTACLE`, `TRAP`, or `OUT_OF_BOUNDS`. |
-| `bot` | `BotInfo` object if a bot occupies this tile, else `null`. |
+| `bots` | List of `BotInfo` objects for all bots occupying this tile (empty list if none). |
 
 Each `BotInfo` contains:
 
@@ -374,13 +377,16 @@ Bot (abstract class):
 
 ```
 BotContext (read-only):
-    position: (int, int)                  # (x, y) of this bot
     frozen_turns_remaining: int           # 0 = free, >0 = frozen
+    move_succeeded: bool                  # true if last movement action worked
+    map_width: int                        # map width in tiles
+    map_height: int                       # map height in tiles
     inbox: List[Message]                  # messages received this turn
     scan_result: ScanResult | None        # result of last SCAN, or None
     broadcast_frequency: int             # current broadcast frequency
     listen_frequency: int                # current listen frequency
     turn_number: int                     # current turn (1-indexed)
+    total_explorable_tiles: int          # non-obstacle, non-trap tiles on the map
 ```
 
 ### 8.4 BotOutput Object
@@ -419,7 +425,7 @@ ScanResult:
 ```
 TileInfo:
     tile_type: TileType                   # EMPTY, OBSTACLE, TRAP, OUT_OF_BOUNDS
-    bot: BotInfo | None                   # present if a bot occupies this tile
+    bots: List[BotInfo]                   # all bots occupying this tile (empty if none)
 ```
 
 ```

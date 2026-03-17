@@ -276,6 +276,8 @@ class SmartBot(Bot):
                             if self._map_promoted:
                                 self._known[tp] = TileType.TRAP
                     elif tag == "S":
+                        if not self._map_promoted:
+                            continue
                         for part in body.split("|"):
                             if ":" not in part:
                                 continue
@@ -595,13 +597,17 @@ class SmartTeam(Team):
         Coordinates outside the map boundaries are filtered out to
         avoid penalising the team for radio-interference artefacts.
         """
+        _EMPTY = TileType.EMPTY
+        _SPAWN = TileType.SPAWN
         merged: dict[tuple[int, int], TileType] = {}
         for bot in self._bots:
             if not bot._map_promoted:
                 continue
             for pos, tile in bot._known.items():
-                if tile is not TileType.OUT_OF_BOUNDS and pos not in merged:
-                    merged[pos] = tile
+                if tile is _EMPTY or tile is _SPAWN:
+                    existing = merged.get(pos)
+                    if existing is None or (existing is _EMPTY and tile is _SPAWN):
+                        merged[pos] = tile
 
         # Determine map bounds from any bot that has seen a context.
         map_w = map_h = 0

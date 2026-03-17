@@ -167,6 +167,7 @@ class PhantomBot(Bot):
         self._enemy_freq_seen: dict[int, int] = {}
         self._enemy_positions: dict[int, tuple[int, int]] = {}
         self._eavesdrop_cycle: int = bot_index - 3 if self._is_spy else 0
+        self._inbox_dispatch_freq: int = TEAM_FREQ  # R19: track previous dispatch freq
         self._fresh_intel: list[tuple[tuple[int, int], str]] = []
         # Buffer intercepted abs-coord tiles before our map is promoted
         self._intel_buffer: dict[tuple[int, int], TileType] = {}
@@ -224,10 +225,12 @@ class PhantomBot(Bot):
                 self._known_traps.add(pos)
 
         # ── Inbox processing ────────────────────────────────────
-        # The engine applies frequency changes BEFORE dispatching
-        # messages, so ctx.listen_frequency correctly reflects which
-        # frequency the current inbox was filled on.
-        inbox_freq = ctx.listen_frequency
+        # With R19-compliant timing, frequency changes take effect
+        # after message dispatch.  The inbox was filled on the
+        # frequency from the previous turn's dispatch — tracked
+        # by _inbox_dispatch_freq.
+        inbox_freq = self._inbox_dispatch_freq
+        self._inbox_dispatch_freq = ctx.listen_frequency
         if self._is_spy and inbox_freq != TEAM_FREQ:
             # Inbox contains enemy messages from eavesdropping
             self._process_intercepted(ctx, inbox_freq)
@@ -461,8 +464,17 @@ class PhantomBot(Bot):
 
         Falls back to blind coordinate noise if no templates have
         been collected yet for a given frequency.
+
+        Disinfo is only sent when the spy is on the team frequency.
+        Sending while on an enemy frequency would cause self-poisoning:
+        the forged message lands in the spy's own inbox (R19 dispatch
+        happens before frequency changes) and gets absorbed as intel.
         """
         if not self._loc:
+            return []
+
+        # Avoid self-poisoning: only send disinfo when on team freq
+        if ctx.listen_frequency != TEAM_FREQ:
             return []
 
         target_freqs = sorted(self._active_enemy_freqs(ctx.turn_number))
@@ -594,6 +606,8 @@ class PhantomBot(Bot):
                             if self._map_promoted:
                                 self._known[tp] = TileType.TRAP
                     elif tag == "S":
+                        if not self._map_promoted:
+                            continue
                         for part in body.split("|"):
                             if ":" not in part:
                                 continue
@@ -1097,13 +1111,17 @@ class PhantomTeam(Team):
         Coordinates outside the map boundaries are filtered out to
         avoid penalising the team for radio-interference artefacts.
         """
+        _EMPTY = TileType.EMPTY
+        _SPAWN = TileType.SPAWN
         merged: dict[tuple[int, int], TileType] = {}
         for bot in self._bots:
             if not bot._map_promoted:
                 continue
             for pos, tile in bot._known.items():
-                if tile is not TileType.OUT_OF_BOUNDS and pos not in merged:
-                    merged[pos] = tile
+                if tile is _EMPTY or tile is _SPAWN:
+                    existing = merged.get(pos)
+                    if existing is None or (existing is _EMPTY and tile is _SPAWN):
+                        merged[pos] = tile
 
         # Determine map bounds from any bot that has seen a context.
         map_w = map_h = 0

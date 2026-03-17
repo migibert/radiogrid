@@ -73,7 +73,7 @@ _TILE_CHAR: dict[TileType, str] = {
     TileType.SPAWN: "S",
 }
 _CHAR_TILE: dict[str, TileType] = {v: k for k, v in _TILE_CHAR.items()}
-_TOKEN = "#RDV#"  # shared secret for message authentication
+_TOKEN_FMT = "#RDV{}#"  # token template — team_id inserted at init
 
 # ── Helpers ──────────────────────────────────────────────────────────
 
@@ -102,10 +102,12 @@ class RendezvousBot(Bot):
     to shared-frame coordinates and bots collaborate immediately.
     """
 
-    def __init__(self, bot_index: int, rng_seed: int | None = None) -> None:
+    def __init__(self, bot_index: int, rng_seed: int | None = None,
+                 team_id: int = 0) -> None:
         super().__init__()
         self._idx = bot_index
         self._rng = random.Random(rng_seed)
+        self._token = _TOKEN_FMT.format(team_id)
 
         # ── Position tracking (own spawn = origin) ───────────────
         self._rel_x: int = 0
@@ -133,6 +135,7 @@ class RendezvousBot(Bot):
         self._known_traps: set[tuple[int, int]] = set()
         self._in_shared_frame: bool = False
         self._visited: set[tuple[int, int]] = set()
+        self._tiles_broadcast: set[tuple[int, int]] = set()
         self._peer_positions: dict[int, tuple[int, int]] = {}
 
         # ── Absolute localisation ────────────────────────────────
@@ -224,6 +227,12 @@ class RendezvousBot(Bot):
                 if ctx.turn_number >= _BOOTSTRAP_TIMEOUT:
                     # Give up bootstrap — explore in spawn-relative frame
                     self._bootstrap_done = True
+                    # Assign border direction for direct localisation
+                    if self._border_dir is None:
+                        if self._idx < 4:
+                            self._border_dir = _BORDER_DIRS[self._idx]
+                        else:
+                            self._border_dir = (0, -1)
                 else:
                     return BotOutput(action=Action.SCAN, messages=bootstrap_msgs)
 
@@ -269,7 +278,7 @@ class RendezvousBot(Bot):
         for (dx, dy), tile_info in ctx.scan_result.tiles.items():
             for bot_info in tile_info.bots:
                 if bot_info.team_id == self.team_id and bot_info.id != self.id:
-                    self._my_sightings[bot_info.id] = (dx, dy)
+                    self._my_sightings.setdefault(bot_info.id, (dx, dy))
                     self._team_engine_ids.add(bot_info.id)
         self._team_engine_ids.add(self.id)
         if self._my_sightings:
@@ -283,9 +292,9 @@ class RendezvousBot(Bot):
             B<observer_id>:<seen_id>,<dx>,<dy>|<seen_id>,<dx>,<dy>|...
         """
         for msg in ctx.inbox:
-            if not msg.content.startswith(_TOKEN):
+            if not msg.content.startswith(self._token):
                 continue
-            payload = msg.content[len(_TOKEN):]
+            payload = msg.content[len(self._token):]
             if not payload.startswith("B"):
                 continue
             try:
@@ -370,7 +379,7 @@ class RendezvousBot(Bot):
                 f"{sid},{dx},{dy}"
                 for sid, (dx, dy) in self._my_sightings.items()
             ]
-            content = _TOKEN + f"B{self.id}:" + "|".join(parts)
+            content = self._token + f"B{self.id}:" + "|".join(parts)
             msgs.append(Message(frequency=freq, content=content[:256]))
 
         # Messages 2-3: relay peer sightings for transitive discovery
@@ -381,7 +390,7 @@ class RendezvousBot(Bot):
                 f"{sid},{dx},{dy}"
                 for sid, (dx, dy) in sightings.items()
             ]
-            content = _TOKEN + f"B{obs_id}:" + "|".join(parts)
+            content = self._token + f"B{obs_id}:" + "|".join(parts)
             msgs.append(Message(frequency=freq, content=content[:256]))
 
         return msgs[:3]
@@ -403,6 +412,7 @@ class RendezvousBot(Bot):
         self._target = None
         self._path = []
         self._peer_positions.clear()
+        self._tiles_broadcast.clear()
         self._in_shared_frame = True
 
         # Assign border-seeking direction now that we're in shared frame
@@ -427,8 +437,6 @@ class RendezvousBot(Bot):
         the shared frame so that ``_pos`` is consistent.
         """
         if self._abs_localized or ctx.scan_result is None:
-            return
-        if not self._in_shared_frame:
             return
 
         tiles = ctx.scan_result.tiles
@@ -512,11 +520,13 @@ class RendezvousBot(Bot):
         ``abs = shared + (spawn_abs - shared_offset)``.
         """
         assert self._spawn_abs_x is not None and self._spawn_abs_y is not None
-        assert self._shared_offset is not None
 
-        # delta from shared-frame origin to absolute origin
-        dx = self._spawn_abs_x - self._shared_offset[0]
-        dy = self._spawn_abs_y - self._shared_offset[1]
+        # delta from current frame origin to absolute origin.
+        # When shared_offset is None (bootstrap failed), the map is
+        # in spawn-relative coords where own spawn = (0, 0).
+        so = self._shared_offset if self._shared_offset is not None else (0, 0)
+        dx = self._spawn_abs_x - so[0]
+        dy = self._spawn_abs_y - so[1]
 
         self._known = {
             (sx + dx, sy + dy): t for (sx, sy), t in self._known.items()
@@ -532,6 +542,7 @@ class RendezvousBot(Bot):
         }
         self._target = None
         self._path = []
+        self._tiles_broadcast.clear()
         self._abs_promoted = True
 
     # ================================================================
@@ -562,9 +573,9 @@ class RendezvousBot(Bot):
         ``A`` messages (they'll be re-sent next turn anyway).
         """
         for msg in ctx.inbox:
-            if not msg.content.startswith(_TOKEN):
+            if not msg.content.startswith(self._token):
                 continue
-            payload = msg.content[len(_TOKEN):]
+            payload = msg.content[len(self._token):]
             for segment in payload.split(";"):
                 segment = segment.strip()
                 if len(segment) < 3:
@@ -573,15 +584,22 @@ class RendezvousBot(Bot):
                 if prefix not in ("R", "A", "L"):
                     continue
                 # Determine coordinate transform needed
-                if prefix == "A" and not self._abs_promoted:
-                    continue  # can't use absolute data yet
-                if prefix == "R" and self._abs_promoted:
-                    # Convert shared→absolute on the fly
-                    assert self._spawn_abs_x is not None and self._shared_offset is not None
-                    cdx = self._spawn_abs_x - self._shared_offset[0]
-                    cdy = self._spawn_abs_y - self._shared_offset[1]  # type: ignore[operator]
-                else:
+                if prefix == "A":
+                    if not self._abs_promoted:
+                        continue
                     cdx, cdy = 0, 0
+                elif prefix == "R":
+                    if self._abs_promoted:
+                        if self._shared_offset is None:
+                            continue  # direct-localized, can't convert R
+                        cdx = self._spawn_abs_x - self._shared_offset[0]  # type: ignore[operator]
+                        cdy = self._spawn_abs_y - self._shared_offset[1]  # type: ignore[operator]
+                    elif self._in_shared_frame:
+                        cdx, cdy = 0, 0
+                    else:
+                        continue  # not in any compatible frame
+                else:
+                    cdx, cdy = 0, 0  # L-prefix handled below
 
                 tag = segment[1]
                 body = segment[2:]
@@ -642,7 +660,7 @@ class RendezvousBot(Bot):
 
         Uses ``A`` prefix when in absolute mode, ``R`` when in shared frame.
         """
-        if not self._in_shared_frame:
+        if not self._in_shared_frame and not self._abs_promoted:
             return []
 
         pfx = "A" if self._abs_promoted else "R"
@@ -665,11 +683,11 @@ class RendezvousBot(Bot):
                 f"{x},{y}" for x, y in _traps_iter
             )
             candidate = ";".join(parts) + ";" + trap_body
-            if len(_TOKEN + candidate) <= 256:
+            if len(self._token + candidate) <= 256:
                 parts.append(trap_body)
             else:
-                msgs.append(Message(frequency=freq, content=(_TOKEN + trap_body)[:256]))
-        msgs.insert(0, Message(frequency=freq, content=(_TOKEN + ";".join(parts))[:256]))
+                msgs.append(Message(frequency=freq, content=(self._token + trap_body)[:256]))
+        msgs.insert(0, Message(frequency=freq, content=(self._token + ";".join(parts))[:256]))
 
         # msg 2: scan tile data
         if ctx.scan_result is not None:
@@ -678,14 +696,34 @@ class RendezvousBot(Bot):
                 c = _TILE_CHAR.get(ti.tile_type)
                 if c is None:
                     continue
-                sp.append(f"{pos[0]+dx},{pos[1]+dy}:{c}")
+                tile_pos = (pos[0] + dx, pos[1] + dy)
+                sp.append(f"{tile_pos[0]},{tile_pos[1]}:{c}")
+                self._tiles_broadcast.add(tile_pos)
             if sp:
                 msgs.append(
                     Message(
                         frequency=freq,
-                        content=(_TOKEN + f"{pfx}S" + "|".join(sp))[:256],
+                        content=(self._token + f"{pfx}S" + "|".join(sp))[:256],
                     )
                 )
+
+        # Fill remaining message slots with previously unsent tiles
+        unsent = [
+            (p, _TILE_CHAR[t])
+            for p, t in self._known.items()
+            if p not in self._tiles_broadcast and t in _TILE_CHAR
+        ]
+        i = 0
+        while i < len(unsent) and len(msgs) < 3:
+            batch = unsent[i:i + 25]
+            i += 25
+            parts = [f"{p[0]},{p[1]}:{c}" for p, c in batch]
+            msgs.append(Message(
+                frequency=freq,
+                content=(self._token + f"{pfx}S" + "|".join(parts))[:256],
+            ))
+            for p, _ in batch:
+                self._tiles_broadcast.add(p)
 
         return msgs[:3]
 
@@ -963,6 +1001,7 @@ class RendezvousTeam(Team):
             RendezvousBot(
                 bot_index=i,
                 rng_seed=(self._seed + i if self._seed is not None else None),
+                team_id=self.team_id,
             )
             for i in range(5)
         ]
@@ -1001,19 +1040,25 @@ class RendezvousTeam(Team):
                 )
                 break
 
+        _EMPTY = TileType.EMPTY
+        _SPAWN = TileType.SPAWN
         for bot in self._bots:
             if bot._abs_promoted:
                 # Already in absolute coordinates
                 for pos, tile in bot._known.items():
-                    if tile is not TileType.OUT_OF_BOUNDS and pos not in merged:
-                        merged[pos] = tile
+                    if tile is _EMPTY or tile is _SPAWN:
+                        existing = merged.get(pos)
+                        if existing is None or (existing is _EMPTY and tile is _SPAWN):
+                            merged[pos] = tile
             elif bot._in_shared_frame and abs_delta is not None:
                 # Translate shared-frame coords to absolute
                 dx, dy = abs_delta
                 for (sx, sy), tile in bot._known.items():
                     apos = (sx + dx, sy + dy)
-                    if tile is not TileType.OUT_OF_BOUNDS and apos not in merged:
-                        merged[apos] = tile
+                    if tile is _EMPTY or tile is _SPAWN:
+                        existing = merged.get(apos)
+                        if existing is None or (existing is _EMPTY and tile is _SPAWN):
+                            merged[apos] = tile
 
         # Filter out coordinates outside the known map boundaries.
         if map_w > 0:
