@@ -1,0 +1,8 @@
+Metadata-Version: 2.4
+Name: radiogrid
+Version: 1.0.0
+Summary: A Bot Exploration & Communication Game
+Requires-Python: >=3.10
+Requires-Dist: flask>=3.0
+Provides-Extra: dev
+Requires-Dist: pytest>=7.0; extra == "dev"
